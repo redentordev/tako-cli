@@ -31,12 +31,12 @@
 
 ## 6. Docs snippet harness and CONFIGURATION.md rewrite
 
-- [ ] 6.1 Add `docs/docs_snippets_test.go` (`package docs_test`). It parses ```yaml/```yml fences and their markers (`complete` / `partial` / `skip: <reason>`), enforces markers in CONFIGURATION.md and ORCHESTRATION-MODEL.md, rejects a top-level `services:` key with the fix-it message, and validates through `internal/configtest`. Verify that it initially fails, listing the unmarked blocks.
-- [ ] 6.2 Re-nest each of the 20 top-level `services:` snippets in docs/CONFIGURATION.md (starting at lines 10, 274, 335, 362, 398, 496, 612, 672, ...) under `environments.production.services`, and add markers to all 33 blocks. Verify that the CONFIGURATION.md subtests of `go test ./docs` pass.
-- [ ] 6.3 Fix the multi-server example (docs/CONFIGURATION.md:301-331): add `project`, add server `labels: {role: web}`, add `environments.production.proxy.placement` pinned to `node1`, and explain the single-proxy-node ACME rule in one sentence. Mark it `complete`. Verify that it passes in `go test ./docs`.
-- [ ] 6.4 Change the redirect text at docs/CONFIGURATION.md:620,628 to 308 (permanent, preserves method and path), and fix the comment at `pkg/config/types.go:545`. Verify with `rg -n "301" docs/CONFIGURATION.md cmd/init.go pkg/config/types.go`, which should return no redirect references.
-- [ ] 6.5 Replace "Parallel Deployment (Default)" (docs/CONFIGURATION.md:1033-1053) with "Deploy Order and Concurrency" plus a "Deprecated keys" table (key, guidance, removal release). Keep the `deployment.build` example. Verify that `go test ./docs` passes and that the section no longer contains `maxConcurrent`.
-- [ ] 6.6 Add markers to the two `services:` snippets in docs/ORCHESTRATION-MODEL.md (:381, :438) and the rest of its yaml blocks, re-nesting where needed. Verify that its subtests in `go test ./docs` pass.
+- [x] 6.1 Add `docs/docs_snippets_test.go` (`package docs_test`). It parses ```yaml/```yml fences and their markers (`complete` / `partial` / `skip: <reason>`), enforces markers in CONFIGURATION.md and ORCHESTRATION-MODEL.md, rejects a top-level `services:` key with the fix-it message, and validates through `internal/configtest`. Verify that it initially fails, listing the unmarked blocks.
+- [x] 6.2 Re-nest each of the 20 top-level `services:` snippets in docs/CONFIGURATION.md (starting at lines 10, 274, 335, 362, 398, 496, 612, 672, ...) under `environments.production.services`, and add markers to all 33 blocks. Verify that the CONFIGURATION.md subtests of `go test ./docs` pass.
+- [x] 6.3 Fix the multi-server example (docs/CONFIGURATION.md:301-331): add `project`, add server `labels: {role: web}`, add `environments.production.proxy.placement` pinned to `node1`, and explain the single-proxy-node ACME rule in one sentence. Mark it `complete`. Verify that it passes in `go test ./docs`.
+- [x] 6.4 Change the redirect text at docs/CONFIGURATION.md:620,628 to 308 (permanent, preserves method and path), and fix the comment at `pkg/config/types.go:545`. Verify with `rg -n "301" docs/CONFIGURATION.md cmd/init.go pkg/config/types.go`, which should return no redirect references.
+- [x] 6.5 Replace "Parallel Deployment (Default)" (docs/CONFIGURATION.md:1033-1053) with "Deploy Order and Concurrency" plus a "Deprecated keys" table (key, guidance, removal release). Keep the `deployment.build` example. Verify that `go test ./docs` passes and that the section no longer contains `maxConcurrent`.
+- [x] 6.6 Add markers to the two `services:` snippets in docs/ORCHESTRATION-MODEL.md (:381, :438) and the rest of its yaml blocks, re-nesting where needed. Verify that its subtests in `go test ./docs` pass.
 
 ## 7. Targeted doc text fixes
 

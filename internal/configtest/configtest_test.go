@@ -96,6 +96,23 @@ func TestMergeYAMLFragmentServersReplaceBaseServers(t *testing.T) {
 	}
 }
 
+func TestMergeYAMLAddsPlaceholderServiceOnlyWhenNoneDeclared(t *testing.T) {
+	merged, err := MergeYAML([]byte(BaseYAML), []byte("deployment:\n  build:\n    strategy: auto\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lookup(decode(t, merged), "environments", "production", "services", PlaceholderService, "image"); got != "nginx:alpine" {
+		t.Fatalf("placeholder service image = %v", got)
+	}
+	merged, err = MergeYAML([]byte(BaseYAML), []byte("environments:\n  production:\n    services:\n      web:\n        image: nginx\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lookup(decode(t, merged), "environments", "production", "services", PlaceholderService); got != nil {
+		t.Fatalf("placeholder added despite declared services: %v", got)
+	}
+}
+
 func TestMergeYAMLKeepsExplicitEnvironmentServers(t *testing.T) {
 	merged, err := MergeYAML([]byte(BaseYAML), []byte(`servers:
   node1:

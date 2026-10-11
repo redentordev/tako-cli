@@ -44,30 +44,36 @@ const AutoFillValue = "example-value"
 // TEST-NET-3 documentation range. TAKO_SSH_KEY is set by SetupEnv because it
 // points into the temporary home directory.
 var Placeholders = map[string]string{
-	"TAKO_PRODUCTION_HOST":  "203.0.113.10",
-	"TAKO_STAGING_HOST":     "203.0.113.11",
-	"TAKO_SERVER_HOST":      "203.0.113.10",
-	"SERVER_HOST":           "203.0.113.10",
-	"SERVER_IP":             "203.0.113.10",
-	"SERVER1_HOST":          "203.0.113.11",
-	"SERVER2_HOST":          "203.0.113.12",
-	"SERVER3_HOST":          "203.0.113.13",
-	"SERVER_USER":           "root",
-	"LETSENCRYPT_EMAIL":     "ops@example.com",
-	"ACME_EMAIL":            "ops@example.com",
-	"MAILER_EMAIL":          "ops@example.com",
-	"POSTGRES_PASSWORD":     "example-postgres-password",
-	"MYSQL_PASSWORD":        "example-mysql-password",
-	"MYSQL_ROOT_PASSWORD":   "example-mysql-root-password",
-	"REDIS_PASSWORD":        "example-redis-password",
-	"REGISTRY_USER":         "example-registry-user",
-	"REGISTRY_TOKEN":        "example-registry-token",
-	"SLACK_WEBHOOK_URL":     "https://hooks.slack.com/services/T000/B000/XXXX",
-	"DISCORD_WEBHOOK_URL":   "https://discord.com/api/webhooks/000/XXXX",
-	"WEBHOOK_URL":           "https://hooks.example.com/tako",
-	"CLOUDFLARE_API_TOKEN":  "example-cloudflare-token",
-	"AWS_ACCESS_KEY_ID":     "example-access-key",
-	"AWS_SECRET_ACCESS_KEY": "example-secret-key",
+	"TAKO_PRODUCTION_HOST":   "203.0.113.10",
+	"TAKO_STAGING_HOST":      "203.0.113.11",
+	"TAKO_SERVER_HOST":       "203.0.113.10",
+	"SERVER_HOST":            "203.0.113.10",
+	"SERVER_IP":              "203.0.113.10",
+	"SERVER1_HOST":           "203.0.113.11",
+	"SERVER2_HOST":           "203.0.113.12",
+	"SERVER3_HOST":           "203.0.113.13",
+	"SERVER_USER":            "root",
+	"LETSENCRYPT_EMAIL":      "ops@example.com",
+	"ACME_EMAIL":             "ops@example.com",
+	"MAILER_EMAIL":           "ops@example.com",
+	"POSTGRES_PASSWORD":      "example-postgres-password",
+	"MYSQL_PASSWORD":         "example-mysql-password",
+	"MYSQL_ROOT_PASSWORD":    "example-mysql-root-password",
+	"REDIS_PASSWORD":         "example-redis-password",
+	"REGISTRY_USER":          "example-registry-user",
+	"REGISTRY_TOKEN":         "example-registry-token",
+	"SLACK_WEBHOOK_URL":      "https://hooks.slack.com/services/T000/B000/XXXX",
+	"DISCORD_WEBHOOK_URL":    "https://discord.com/api/webhooks/000/XXXX",
+	"WEBHOOK_URL":            "https://hooks.example.com/tako",
+	"OPERATIONS_WEBHOOK_URL": "https://hooks.example.com/operations",
+	"CLOUDFLARE_API_TOKEN":   "example-cloudflare-token",
+	"AWS_ACCESS_KEY_ID":      "example-access-key",
+	"AWS_SECRET_ACCESS_KEY":  "example-secret-key",
+	// Typed values for documented backup storage snippets.
+	"TAKO_BACKUP_BUCKET":            "tako-backups",
+	"TAKO_BACKUP_ENDPOINT":          "https://example.r2.cloudflarestorage.com",
+	"TAKO_BACKUP_ACCESS_KEY_ID":     "example-backup-access-key",
+	"TAKO_BACKUP_SECRET_ACCESS_KEY": "example-backup-secret-key",
 }
 
 var envRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
@@ -131,6 +137,8 @@ func ReferencedVars(content []byte) []string {
 //   - If the fragment defines top-level servers, the base servers are dropped.
 //     When the fragment also leaves environments.production.servers unset, it
 //     defaults to every fragment server name in sorted order.
+//   - If environments.production ends up with no services, PlaceholderService
+//     is added so fragments that only touch other keys can validate.
 func MergeYAML(base, fragment []byte) ([]byte, error) {
 	baseDoc, err := decodeMapping(base)
 	if err != nil {
@@ -146,6 +154,8 @@ func MergeYAML(base, fragment []byte) ([]byte, error) {
 		delete(baseDoc, "servers")
 	}
 	merged := mergeMaps(baseDoc, fragmentDoc)
+
+	ensureBaseEnvironmentService(merged)
 
 	if replaceServers && !fragmentSetsEnvironmentServers(fragmentDoc, BaseEnvironment) {
 		environments, _ := merged["environments"].(map[string]any)
@@ -168,6 +178,25 @@ func MergeYAML(base, fragment []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encode merged config: %w", err)
 	}
 	return out, nil
+}
+
+// PlaceholderService is added to the base environment when a merged document
+// declares no services there, because an environment needs at least one
+// service to validate and fragments may only touch other keys.
+const PlaceholderService = "placeholder"
+
+func ensureBaseEnvironmentService(doc map[string]any) {
+	environments, _ := doc["environments"].(map[string]any)
+	environment, ok := environments[BaseEnvironment].(map[string]any)
+	if !ok {
+		return
+	}
+	if services, _ := environment["services"].(map[string]any); len(services) > 0 {
+		return
+	}
+	environment["services"] = map[string]any{
+		PlaceholderService: map[string]any{"image": "nginx:alpine"},
+	}
 }
 
 func decodeMapping(data []byte) (map[string]any, error) {
