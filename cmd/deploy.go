@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -12,8 +13,10 @@ import (
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/git"
+	"github.com/redentordev/tako-cli/pkg/hooks"
 	"github.com/redentordev/tako-cli/pkg/projectbinding"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -36,6 +39,7 @@ var (
 	deployPlanOnly        bool
 	deployPlanFile        string
 	deployAcceptCluster   string
+	deploySkipHooks       bool
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -79,6 +83,7 @@ func init() {
 	deployCmd.Flags().BoolVar(&deployPlanOnly, "plan-only", false, "Compute and show the deployment plan without applying it")
 	deployCmd.Flags().StringVar(&deployPlanFile, "plan", "", "Path to a reviewed plan document; apply fails if the computed plan drifted from it")
 	deployCmd.Flags().StringVar(&deployAcceptCluster, "accept-cluster", "", "Attach this workspace to the exact detected platform cluster ID")
+	deployCmd.Flags().BoolVar(&deploySkipHooks, "skip-hooks", false, skipHooksFlagUsage)
 }
 
 func loadDeployConfig(configPath string) (*config.Config, error) {
@@ -135,7 +140,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		DomainTargets:   deployDomainTargets,
 	}
 
-	session, err := cliEngine().PlanDeploy(cmd.Context(), request)
+	hookSession, err := newHookSession(hookCommandDeploy, cfg, configPath, deploySkipHooks)
+	if err != nil {
+		return err
+	}
+
+	session, err := planDeploy(cmd.Context(), request)
 	if err != nil {
 		return err
 	}
@@ -167,17 +177,89 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 	}
-	if err := commitDeployClusterAttachment(cmd, pendingAttachment); err != nil {
-		return err
-	}
 
-	result, err := session.Apply(cmd.Context())
+	// pre-deploy runs with the approved plan while the lock and leases are
+	// still held, before workspace attachment or any mutation.
+	plan := session.Plan()
+	planContext := deployHookContext(plan)
+	var result *engine.DeployResult
+	err = hookSession.runPre(cmd.Context(), planContext)
+	if err == nil {
+		err = commitDeployClusterAttachment(cmd, pendingAttachment)
+	}
+	if err == nil {
+		result, err = session.Apply(cmd.Context())
+	}
+	// Post hooks run after the lock and leases are released so a slow smoke
+	// test does not block other operators.
+	session.Close()
+	err = hookSession.finish(cmd.Context(), err, func() hooks.Context {
+		values := planContext
+		if result != nil {
+			values.DeploymentID = result.DeploymentID
+			values.Result = string(result.Status)
+			values.DurationSeconds = durationPointer(result.Duration)
+		}
+		return values
+	}, func() hooks.Context {
+		values := planContext
+		if result != nil {
+			values.DeploymentID = result.DeploymentID
+			values.DurationSeconds = durationPointer(result.Duration)
+		}
+		return values
+	})
+	if outcomes := hookSession.hookOutcomes(); outcomes != nil {
+		if result == nil {
+			result = failedDeployResult(cfg, request.Environment, plan, err)
+		}
+		result.Hooks = outcomes
+	}
 	if result != nil {
 		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
 			err = emitErr
 		}
 	}
 	return err
+}
+
+// deploySessionAPI is the slice of *engine.DeploySession runDeploy drives.
+type deploySessionAPI interface {
+	Plan() engine.DeployPlan
+	NeedsConfirmation() bool
+	Apply(ctx context.Context) (*engine.DeployResult, error)
+	Close()
+}
+
+// planDeploy computes the plan and takes the lock and leases. Seam for
+// tests.
+var planDeploy = func(ctx context.Context, request engine.DeployRequest) (deploySessionAPI, error) {
+	session, err := cliEngine().PlanDeploy(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+// failedDeployResult is the result document for a deploy that stopped
+// before Apply produced one (for example a failing pre-deploy hook).
+func failedDeployResult(cfg *config.Config, envName string, plan engine.DeployPlan, err error) *engine.DeployResult {
+	result := &engine.DeployResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDeployResult,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Status:      takoapi.StatusFailed,
+		Revision:    plan.Revision,
+		Git:         plan.Git,
+		Services:    []engine.ServiceOutcome{},
+		StartedAt:   time.Now(),
+		PlanHash:    plan.Hash(),
+	}
+	if err != nil {
+		result.Error = cliEngine().RedactSensitive(err.Error())
+	}
+	return result
 }
 
 type pendingDeployClusterAttachment struct {
