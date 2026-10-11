@@ -424,24 +424,38 @@ func (m *Manager) GetRedactor() *Redactor {
 // merged values: envFile wins over envFiles, and later files override earlier
 // ones. CreateEnvFile and redaction registration share it.
 func LoadServiceEnvFiles(service *config.ServiceConfig) (map[string]string, error) {
-	values := make(map[string]string)
+	values, _, err := loadServiceEnvFilesWithSource(service)
+	return values, err
+}
+
+// ServiceEnvFilePaths returns the env files a service loads, in order:
+// envFile alone when set, otherwise envFiles.
+func ServiceEnvFilePaths(service *config.ServiceConfig) []string {
 	if service == nil {
-		return values, nil
+		return nil
 	}
-	paths := service.EnvFiles
 	if service.EnvFile != "" {
-		paths = []string{service.EnvFile}
+		return []string{service.EnvFile}
 	}
-	for _, path := range paths {
+	return service.EnvFiles
+}
+
+// loadServiceEnvFilesWithSource is LoadServiceEnvFiles that also reports
+// which file supplied each key.
+func loadServiceEnvFilesWithSource(service *config.ServiceConfig) (map[string]string, map[string]string, error) {
+	values := make(map[string]string)
+	sources := make(map[string]string)
+	for _, path := range ServiceEnvFilePaths(service) {
 		loaded, err := config.LoadEnvFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load service env file %s: %w", path, err)
+			return nil, nil, fmt.Errorf("failed to load service env file %s: %w", path, err)
 		}
 		for key, value := range loaded {
 			values[key] = value
+			sources[key] = path
 		}
 	}
-	return values, nil
+	return values, sources, nil
 }
 
 // CreateEnvFile creates a Docker env file for a service

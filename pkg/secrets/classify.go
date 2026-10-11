@@ -1,6 +1,10 @@
 package secrets
 
 import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -135,6 +139,7 @@ func ClassifyBackupCredentials(services map[string]config.ServiceConfig) []Redac
 		for _, field := range []struct{ name, value string }{
 			{"accessKeyId", storage.AccessKeyID},
 			{"secretAccessKey", storage.SecretAccessKey},
+			{"sessionToken", storage.SessionToken},
 		} {
 			if field.value != "" {
 				entry := maskedEntry(BackupCredentialLabel(name, field.name), ReasonBackupStorageCredential, field.value)
@@ -186,7 +191,7 @@ func ClassifyServiceEnvFiles(services map[string]config.ServiceConfig) ([]Redact
 	sort.Strings(names)
 	for _, serviceName := range names {
 		service := services[serviceName]
-		values, err := LoadServiceEnvFiles(&service)
+		values, sources, err := loadServiceEnvFilesWithSource(&service)
 		if err != nil {
 			failures = append(failures, ServiceEnvFileError{Service: serviceName, Err: err})
 			continue
@@ -198,6 +203,7 @@ func ClassifyServiceEnvFiles(services map[string]config.ServiceConfig) ([]Redact
 				Reason:  reason,
 				Masked:  reason.Masked(),
 				Service: serviceName,
+				Note:    sources[name],
 				Value:   value,
 			})
 		}
@@ -220,4 +226,72 @@ func ClassifyConfigCredentials(cfg *config.Config, services map[string]config.Se
 	entries = append(entries, ClassifyBackupCredentials(services)...)
 	entries = append(entries, ClassifyNotificationURLs(cfg)...)
 	return entries
+}
+
+// LocalSecretFile is a local .tako secrets file whose keys were read.
+type LocalSecretFile struct {
+	// Name is the display path, `.tako/secrets` or `.tako/secrets.<env>`.
+	Name string
+	// Err is set when the file exists but could not be read.
+	Err error
+}
+
+// LocalSecretKeys reads the key names of the local secrets files for an
+// environment, the same files `tako secrets list` reads: the common file and
+// the environment file, which overrides it. It returns, for each key, the
+// display name of the file that supplies it. Values are discarded and
+// `$(command)` substitutions are never executed. Missing files are skipped;
+// unreadable files are reported in files with Err set.
+func LocalSecretKeys(basePath, environment string) (map[string]string, []LocalSecretFile) {
+	keys := make(map[string]string)
+	var files []LocalSecretFile
+	names := []string{"secrets"}
+	if environment != "" {
+		names = append(names, "secrets."+environment)
+	}
+	for _, name := range names {
+		path := filepath.Join(basePath, name)
+		if _, err := os.Stat(path); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				files = append(files, LocalSecretFile{Name: ".tako/" + name, Err: err})
+			}
+			continue
+		}
+		values, err := readSecretsFile(path)
+		if err != nil {
+			files = append(files, LocalSecretFile{Name: ".tako/" + name, Err: fmt.Errorf("could not read %s", ".tako/"+name)})
+			continue
+		}
+		files = append(files, LocalSecretFile{Name: ".tako/" + name})
+		for key := range values {
+			keys[key] = ".tako/" + name
+		}
+	}
+	return keys, files
+}
+
+// SecretSourceIndexFor returns the index of the secretSources entry that
+// supplies key, without contacting any provider: the last source whose
+// explicit names (after map and prefixStrip) produce key, otherwise the last
+// source in listing mode, which may supply any key. It returns -1 when no
+// source can supply the key.
+func SecretSourceIndexFor(sources []config.SecretSource, key string) int {
+	for i := len(sources) - 1; i >= 0; i-- {
+		source := sources[i]
+		for _, name := range source.Names {
+			mapped, ok := source.Map[name]
+			if !ok {
+				mapped = ProviderSecretKey(name, source.PrefixStrip)
+			}
+			if mapped == key {
+				return i
+			}
+		}
+	}
+	for i := len(sources) - 1; i >= 0; i-- {
+		if len(sources[i].Names) == 0 {
+			return i
+		}
+	}
+	return -1
 }

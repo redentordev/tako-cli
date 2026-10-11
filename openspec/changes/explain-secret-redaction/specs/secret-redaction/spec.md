@@ -9,6 +9,7 @@ Every mask produced by the engine redactor SHALL be rendered as `[REDACTED:<labe
 - `registries.`
 - `environments.`
 - `services.`
+- `builds.`
 - `notifications.`
 - `hooks.`
 - `run.`
@@ -109,7 +110,7 @@ Every command that registers inline service `env:` values SHALL also register th
 - **THEN** one `warning` event with `data.reason: "envfile-unreadable"` is emitted and log lines are still streamed
 
 ### Requirement: Backup storage credentials are registered for redaction
-Every command that registers registry credentials SHALL also register each selected service's `backup.storage.accessKeyId` and `backup.storage.secretAccessKey`, labeled `services.<service>.backup.<field>`.
+Every command that registers registry credentials SHALL also register each selected service's `backup.storage.accessKeyId`, `backup.storage.secretAccessKey` and `backup.storage.sessionToken`, labeled `services.<service>.backup.<field>`.
 
 #### Scenario: Backup secret in a health-failure error
 - **WHEN** `tako rollback` fails a health check and the embedded container log lines contain the value of `backup.storage.secretAccessKey` of service `mongo`

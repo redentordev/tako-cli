@@ -114,6 +114,7 @@ The opt-out (D6) uses the bare `[REDACTED]`. Labels are config-path-like and sta
 | Registry password | `registries.<host>.password` | |
 | ACME DNS credential | `environments.<env>.proxy.acme.<NAME>` | |
 | Backup storage credential | `services.<service>.backup.secretAccessKey` / `services.<service>.backup.accessKeyId` | `backup` exists only on services (`ServiceConfig.Backup`, `config/types.go:390`). |
+| Shared build arg value | `builds.<build>.args.<ARG>` | Added during implementation: the `deploy.go:240` call site registers every `builds.<name>.args` value, not `secrets:` values, and no other kind fits. |
 | Notification URL | `notifications.slack` \| `notifications.discord` \| `notifications.webhook` | |
 | Hook `passEnv` credential | `hooks.passEnv.<NAME>` | |
 | `run` request env (`run.go:113`) | `run.env.<NAME>` | |
@@ -170,13 +171,14 @@ Characters outside `segment` in a name, which config validation should already p
   5. `servers.`
   6. `environments.`
   7. `services.` (backup credentials)
-  8. `notifications.`
-  9. `hooks.`
-  10. `run.`
-  11. `export.`
-  12. `certs.`
-  13. `proxy.`
-  14. unlabeled
+  8. `builds.` (shared build args; added during implementation)
+  9. `notifications.`
+  10. `hooks.`
+  11. `run.`
+  12. `export.`
+  13. `certs.`
+  14. `proxy.`
+  15. unlabeled
 
   This makes the output independent of registration order. A value that is both in `secrets:` and copied into an env var reports `secrets.<KEY>`, which is the source to rotate.
 - **In the engine:**
@@ -230,7 +232,7 @@ A value registered as both public and secret is a secret (as today). The sorted 
 
 ### D8. Register backup storage credentials
 
-New `Engine.RegisterBackupSecrets(services)` walks each selected service's `backup.storage` and registers both `secretAccessKey` and `accessKeyId` under `services.<service>.backup.<field>`. With YAML anchors, the same value is registered for several services; D3's tie-break picks the lexicographically first label. It is called wherever `RegisterRegistrySecrets` is called, plus in deploy, destroy, logs, rollback (both forms), promote, scale, remove, hooks, and the `backup` command paths that emit events.
+New `Engine.RegisterBackupSecrets(services)` walks each selected service's `backup.storage` and registers `secretAccessKey`, `accessKeyId` and (added during implementation) the optional `sessionToken` under `services.<service>.backup.<field>`. With YAML anchors, the same value is registered for several services; D3's tie-break picks the lexicographically first label. It is called wherever `RegisterRegistrySecrets` is called, plus in deploy, destroy, logs, rollback (both forms), promote, scale, remove, hooks, and the `backup` command paths that emit events.
 
 ### D9. `tako config explain --redaction`
 
@@ -331,3 +333,17 @@ Review additions (flaws found and fixed in this design):
 
 - **Public values no longer shield secrets that contain them (D4).** One length-ordered pass over secrets and public values replaces protect-then-replace, which leaked the rest of any secret that starts with or contains a project or service name. A secret stays visible only when it lies entirely inside a longer public value.
 - **Only markers this redactor could have produced are protected (D5).** Protecting every grammar match let marker-shaped text shield a secret inside the brackets.
+
+## Implementation notes
+
+Deviations and details settled while implementing, each the safest equivalent of the plan:
+
+- **`builds.` label kind.** The `deploy.go:240` call site registers every shared `builds.<name>.args` value, not `secrets:` values. No D1 kind fits, so it is labeled `builds.<build>.args.<ARG>` and ranked after `services.`.
+- **`backup.storage.sessionToken`** is registered alongside `accessKeyId` and `secretAccessKey`; it is the same kind of credential.
+- **Pattern rendering.** Each pattern names the submatch that holds the secret. Everything before it is kept, so `password: x` keeps its space (`password: [REDACTED:pattern.assignment]`) and connection strings mask only the password (`postgres://app:[REDACTED:pattern.connection-string]@db`). A pattern value that consists only of protected markers or public values (plus closing punctuation) is left alone, which keeps `KEY=[REDACTED:secrets.KEY]` intact and redaction idempotent.
+- **Overlapping secrets** that only partly overlap are merged into one marker covering their union, labeled by the longer secret, so no fragment of either leaks.
+- **Labels() registry.** Marker protection uses every label ever registered with the redactor, not only the winning label of each value.
+- **`exec`** registers the selected service's envFile values in both attach and one-off modes; `logs` registers envFile values for the selected services (the warning names the service).
+- **`backup` commands** do not route output through the engine redactor today, so there is no backup-command call site to add; deploy, destroy, logs, rollback (both forms), promote, scale, remove, run and hooks register backup credentials.
+- **Unreadable envFile in the report** is shown inline as `envFile unreadable: <path>; its values will not be redacted` without the underlying error text, which could quote file content. Config validation already rejects a missing envFile, so this only occurs for files that become unreadable.
+- **Local secret keys** are read with a new `secrets.LocalSecretKeys`, which never creates `.tako/`, never writes `.gitignore` and never runs `$(command)` substitutions (unlike `NewManager`).

@@ -24,13 +24,21 @@ var configExplainCmd = &cobra.Command{
 expansion, environment inheritance (extends), default resolution, and
 validation. When the selected environment extends another, the header shows
 the extends chain and each environment-scoped value names the environment
-that supplied it. This command does not contact servers or write files.`,
+that supplied it. This command does not contact servers or write files.
+
+With --redaction, print only the redaction report: every config value Tako
+masks in output and its marker label, each service's secrets, env and
+envFile keys marked masked or visible with the reason, secrets that cannot
+be resolved, the names kept public, and the heuristic pattern IDs. The
+report never prints a value, never contacts servers and never runs secret
+provider CLIs.`,
 	RunE: runConfigExplain,
 }
 
 func init() {
 	rootCmd.AddCommand(configCmd)
 	configCmd.AddCommand(configExplainCmd)
+	configExplainCmd.Flags().BoolVar(&configExplainRedaction, "redaction", false, "Report what Tako masks in output for the environment, and why (no values, offline)")
 }
 
 func runConfigExplain(cmd *cobra.Command, args []string) error {
@@ -41,6 +49,9 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 	}
 	if err := ensureDeployRuntimeSupported(cfg); err != nil {
 		return formatDeployConfigError(configPath, fmt.Errorf("invalid config: %w", err))
+	}
+	if configExplainRedaction {
+		return runConfigRedactionReport(cmd.OutOrStdout(), cfg, configPath, getEnvironmentName(cfg))
 	}
 
 	rawCfg, err := loadRawConfigForExplain(configPath)

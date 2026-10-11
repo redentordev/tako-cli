@@ -16,10 +16,22 @@ validation. When the selected environment extends another, the header shows
 the extends chain and each environment-scoped value names the environment
 that supplied it. This command does not contact servers or write files.
 
+.PP
+With --redaction, print only the redaction report: every config value Tako
+masks in output and its marker label, each service's secrets, env and
+envFile keys marked masked or visible with the reason, secrets that cannot
+be resolved, the names kept public, and the heuristic pattern IDs. The
+report never prints a value, never contacts servers and never runs secret
+provider CLIs.
+
 
 .SH OPTIONS
 \fB-h\fP, \fB--help\fP[=false]
 	help for explain
+
+.PP
+\fB--redaction\fP[=false]
+	Report what Tako masks in output for the environment, and why (no values, offline)
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS

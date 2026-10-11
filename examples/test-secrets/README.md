@@ -99,7 +99,7 @@ Should parse and display database connection info without exposing credentials.
 
 ### ✅ What Should Happen
 
-1. **Secrets never in logs**: When deploying, you should see `[REDACTED]` or `po***ql` instead of actual values
+1. **Secrets never in logs**: When deploying, you should see labeled masks such as `[REDACTED:secrets.DATABASE_URL]` instead of actual values (plain `[REDACTED]` with `TAKO_REDACTION_LABELS=off`)
 2. **Secrets never in `ps aux`**: The secrets are in an env file, not command line args
 3. **Secrets accessible in container**: The API endpoints should confirm all secrets are loaded
 4. **Env file cleanup**: The temporary env file `/tmp/tako-*.env` should be deleted after container starts
@@ -117,7 +117,7 @@ Should parse and display database connection info without exposing credentials.
 - [ ] Deploy succeeds without errors
 - [ ] `/health` endpoint returns 200
 - [ ] `/api/verify-secrets` shows all 4 secrets loaded
-- [ ] Deployment logs show `[REDACTED]` instead of actual secrets
+- [ ] Deployment logs show `[REDACTED:<source>]` markers instead of actual secrets
 - [ ] `ps aux | grep docker` doesn't show secrets in command line
 - [ ] Temp env file is deleted after deployment
 - [ ] STRIPE_KEY alias works (reads from STRIPE_SECRET_KEY)
@@ -159,7 +159,7 @@ cat .tako/secrets.production
 tako deploy --env production --verbose
 
 # Check if secrets are being redacted in logs
-# You should see [REDACTED] or partial values like po***ql
+# You should see markers like [REDACTED:secrets.DATABASE_URL], never partial values
 ```
 
 ### API returns "NOT_SET"?

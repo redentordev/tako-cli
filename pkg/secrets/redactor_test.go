@@ -189,7 +189,7 @@ func TestRedactorPublicNameDoesNotShieldLongerSecret(t *testing.T) {
 func TestRedactorPublicOverlappingSecretEdgesDoesNotShield(t *testing.T) {
 	r := newLabeledRedactor(t)
 	r.RegisterPublic("web-frontend")
-	r.RegisterLabeled("s3cr3t-web", "env.A_TOKEN")      // overlaps the public start
+	r.RegisterLabeled("s3cr3t-web", "env.A_TOKEN")     // overlaps the public start
 	r.RegisterLabeled("frontend-t0ken", "env.B_TOKEN") // overlaps the public end
 	got := r.Redact("a s3cr3t-web-frontend-t0ken b")
 	if strings.Contains(got, "s3cr3t") || strings.Contains(got, "t0ken") {
