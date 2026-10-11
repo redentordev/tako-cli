@@ -177,8 +177,11 @@ Set `TAKO_SSH_CONNECT_ATTEMPTS` explicitly when you want a different budget.
 The first retry follows after one second; later retries wait about 31-35
 seconds so an SSH rate limiter such as `ufw limit 22/tcp` (six new connections
 per 30 seconds, re-armed by every blocked attempt) can clear. `tako setup`
-allows SSH with `ufw allow` and relies on fail2ban instead; re-run setup, or
-run `ufw allow 22/tcp`, on hosts provisioned with the older limit rule.
+allows SSH with `ufw allow` on 22 and the server's configured `port` and relies
+on fail2ban instead; re-run setup, or run `ufw allow <port>/tcp`, on hosts
+provisioned with the older limit rule. Setup's own post-firewall SSH probe
+uses a bounded budget (two attempts, 10 seconds each) and ignores
+`TAKO_SSH_CONNECT_ATTEMPTS`, so a blocked port fails the step quickly.
 
 When a node is destroyed or firewalled, state and deploy commands still fail
 closed, but SSH should not hang for minutes. Use `TAKO_SSH_CONNECT_TIMEOUT` and
