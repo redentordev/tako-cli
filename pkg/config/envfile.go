@@ -39,8 +39,11 @@ func LoadEnvFile(path string) (map[string]string, error) {
 		// Parse KEY=VALUE format
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
-			// Skip invalid lines with a warning (don't fail)
-			fmt.Fprintf(os.Stderr, "Warning: Invalid line %d in %s: %s\n", lineNum, path, line)
+			// Skip invalid lines with a warning (don't fail). Never echo the
+			// line content: env files hold secrets and this warning bypasses
+			// output redaction (it is reached from config explain --redaction,
+			// logs, hooks, and other read-only commands).
+			fmt.Fprintf(os.Stderr, "Warning: Invalid line %d in %s (expected KEY=VALUE; content not shown)\n", lineNum, path)
 			continue
 		}
 

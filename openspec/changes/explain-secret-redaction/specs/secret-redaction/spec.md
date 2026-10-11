@@ -55,6 +55,10 @@ A registered secret occurrence SHALL be left unmasked only when it lies entirely
 - **WHEN** service `jardin-cms` is registered as public, `jardin` is registered as `env.SITE_TOKEN`, and output contains `deployed jardin-cms with jardin`
 - **THEN** the output is `deployed jardin-cms with [REDACTED:env.SITE_TOKEN]`
 
+#### Scenario: Public name does not exempt a pattern match
+- **WHEN** service `postgres` is registered as public and output contains `POSTGRES_PASSWORD=postgres`
+- **THEN** the output is `POSTGRES_PASSWORD=[REDACTED:pattern.assignment]`
+
 ### Requirement: Redaction is deterministic and idempotent
 Registered values SHALL be replaced longest first, so that overlapping secrets produce the same output on every run. Applying redaction to already-redacted text with the same redactor SHALL NOT change it. Markers this redactor could have produced SHALL NOT be altered by registered values or patterns, whether already present or inserted during redaction.
 
@@ -69,6 +73,14 @@ Registered values SHALL be replaced longest first, so that overlapping secrets p
 #### Scenario: Marker survives the key/value pattern
 - **WHEN** text containing `[REDACTED:secrets.API_KEY]` is redacted again
 - **THEN** the marker is unchanged
+
+#### Scenario: Input cannot forge internal placeholders
+- **WHEN** `shop` is registered as public, `shop-9f8e7d` as `env.API_SECRET`, and output contains `shop ` followed by a NUL byte, `0`, a NUL byte and `-9f8e7d`
+- **THEN** the output equals the input, NUL bytes included, and does not contain `shop-9f8e7d`
+
+#### Scenario: Large input
+- **WHEN** a single 700 KB line contains tens of thousands of secret and public-value occurrences
+- **THEN** redaction completes in time near-linear in the line length, well under one second
 
 ### Requirement: Only markers the redactor could have produced are protected
 Marker protection SHALL apply only to the bare `[REDACTED]`, to markers whose label is registered with the same redactor, and to `[REDACTED:pattern.<id>]` for a known pattern ID. Any other text shaped like a marker SHALL be redacted as ordinary text.
@@ -87,6 +99,10 @@ Every command that registers inline service `env:` values SHALL also register th
 #### Scenario: Plain envFile setting stays visible
 - **WHEN** the envFile contains `LOG_LEVEL=debug` and output contains `debug`
 - **THEN** `debug` is not masked
+
+#### Scenario: Invalid envFile line is not echoed
+- **WHEN** an envFile line has no `=` (for example a pasted token) and any command loads the file, including `tako config explain --redaction`
+- **THEN** the warning names the line number and file path and does not contain the line's content
 
 #### Scenario: Unreadable envFile in logs
 - **WHEN** `tako logs admin` runs and `.env.production` does not exist on the operator machine
