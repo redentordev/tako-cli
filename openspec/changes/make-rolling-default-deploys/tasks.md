@@ -49,7 +49,7 @@
 
 ## 7. Integration checks
 
-- [ ] 7.1 Run `go build ./...` and `go test ./...`. Triage Windows-only failures against known symlink/fsync/POSIX cases.
+- [x] 7.1 Run `go build ./...` and `go test ./...`. Triage Windows-only failures against known symlink/fsync/POSIX cases.
 - [ ] 7.2 Run a manual end-to-end check on a Linux VPS: an upgrade from a recreate-defaulted deploy shows the plan reason, then a zero-downtime transition (curl loop sees no 5xx); a broken image on a recreate service restores the old container; a broken image on a defaulted-rolling service keeps the old revision serving; an old takod node triggers the fallback warning.
 
 ## Workflow follow-up
