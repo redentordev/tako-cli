@@ -79,9 +79,12 @@ func TestCleanupActionResultHygieneGolden(t *testing.T) {
 	}
 }
 
-func TestCleanupActionResultNoticesDoNotMakeTheRunPartial(t *testing.T) {
+func TestCleanupActionResultOutcome(t *testing.T) {
 	results := []cleanupNodeResult{{serverName: "node-b", response: &takod.CleanupResponse{}, notices: []string{"old-image removal skipped"}}}
-	if ack := cleanupActionResult("demo", "production", results, 0); ack.Outcome != engine.ActionOutcomeOK {
+	if ack := cleanupActionResult("demo", "production", results, 1); ack.Outcome != engine.ActionOutcomePartial {
+		t.Fatalf("a skipped old-image removal must make the run partial: %s", ack.Outcome)
+	}
+	if ack := cleanupActionResult("demo", "production", []cleanupNodeResult{{serverName: "node-a", response: &takod.CleanupResponse{}}}, 0); ack.Outcome != engine.ActionOutcomeOK {
 		t.Fatalf("outcome = %s", ack.Outcome)
 	}
 }

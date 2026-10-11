@@ -182,9 +182,12 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// An old node skipping old-image removal is a warning: the run is
+		// partial under the ActionResult rules (exit 6).
 		for _, notice := range result.notices {
 			fmt.Fprintf(out, "  ⚠️  %s\n", notice)
 		}
+		totalErrors += len(result.notices)
 		if len(result.response.Warnings) > 0 {
 			totalErrors += len(result.response.Warnings)
 			printCleanupWarnings(out, result.response)
@@ -235,8 +238,8 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 }
 
 // cleanupActionResult builds the machine-facing acknowledgement. Notices
-// (an old node skipping old-image removal) are warnings on the outcome but
-// do not make the run partial; the node's own warnings do.
+// (an old node skipping old-image removal) are listed with the node's
+// warnings; totalErrors, which counts both, decides a partial outcome.
 func cleanupActionResult(project string, envName string, results []cleanupNodeResult, totalErrors int) engine.ActionResult {
 	ack := engine.ActionResult{
 		APIVersion:  takoapi.APIVersionCurrent,
@@ -350,7 +353,8 @@ type cleanupNodeResult struct {
 	host       string
 	response   *takod.CleanupResponse
 	err        error
-	// notices are informational per-node warnings that do not fail the run.
+	// notices are client-side per-node warnings (old-image removal skipped
+	// on a node without disk hygiene).
 	notices []string
 }
 

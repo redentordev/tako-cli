@@ -15,6 +15,9 @@ const (
 // human output prints as a `=== Section ===` heading; a section may emit
 // several checks.
 type DoctorCheck struct {
+	// ID is a stable machine identifier for checks that have one (for
+	// example "disk-hygiene"); other checks are identified by Name.
+	ID          string `json:"id,omitempty"`
 	Name        string `json:"name"`
 	Status      string `json:"status"`
 	Detail      string `json:"detail"`
