@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path"
@@ -2324,11 +2325,7 @@ func validateProxyRoutePolicy(serviceName string, proxy *ProxyConfig) error {
 	if len(proxy.ResponseHeaders) > 64 {
 		return fmt.Errorf("service %s: proxy.responseHeaders supports at most 64 entries", serviceName)
 	}
-	forbidden := map[string]bool{
-		"connection": true, "content-length": true, "host": true, "http2-settings": true,
-		"keep-alive": true, "proxy-authenticate": true, "proxy-authorization": true,
-		"proxy-connection": true, "te": true, "trailer": true, "transfer-encoding": true, "upgrade": true,
-	}
+	forbidden := proxyHopByHopFramingHeaders
 	headers := make(map[string]string, len(proxy.ResponseHeaders))
 	for name, value := range proxy.ResponseHeaders {
 		if name != strings.TrimSpace(name) || value != strings.TrimSpace(value) {
@@ -2354,7 +2351,82 @@ func validateProxyRoutePolicy(serviceName string, proxy *ProxyConfig) error {
 	} else {
 		proxy.ResponseHeaders = headers
 	}
+
+	requestHeaders, err := validateProxyRequestHeaders(serviceName, proxy.RequestHeaders)
+	if err != nil {
+		return err
+	}
+	proxy.RequestHeaders = requestHeaders
 	return nil
+}
+
+// proxyHopByHopFramingHeaders lists header names (lowercase) that neither
+// responseHeaders nor requestHeaders may set. takod mirrors this list.
+var proxyHopByHopFramingHeaders = map[string]bool{
+	"connection": true, "content-length": true, "host": true, "http2-settings": true,
+	"keep-alive": true, "proxy-authenticate": true, "proxy-authorization": true,
+	"proxy-connection": true, "te": true, "trailer": true, "transfer-encoding": true, "upgrade": true,
+}
+
+// proxyClientIdentityHeaders lists request header names (lowercase) that are
+// managed by the proxy so the app and logs keep seeing the real client IP.
+var proxyClientIdentityHeaders = map[string]bool{
+	"x-forwarded-for": true, "forwarded": true, "x-real-ip": true,
+}
+
+const (
+	proxyRequestHeadersMaxEntries = 32
+	proxyRequestHeaderMaxValueLen = 1024
+)
+
+func validateProxyRequestHeaders(serviceName string, source map[string]string) (map[string]string, error) {
+	if len(source) > proxyRequestHeadersMaxEntries {
+		return nil, fmt.Errorf("service %s: proxy.requestHeaders supports at most %d entries", serviceName, proxyRequestHeadersMaxEntries)
+	}
+	headers := make(map[string]string, len(source))
+	for name, value := range source {
+		if name != strings.TrimSpace(name) || value != strings.TrimSpace(value) {
+			return nil, fmt.Errorf("service %s: proxy.requestHeaders names and values cannot have surrounding whitespace", serviceName)
+		}
+		if name == "" || len(name) > 128 || !proxyHeaderNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("service %s: invalid proxy.requestHeaders name %q", serviceName, name)
+		}
+		canonical := textproto.CanonicalMIMEHeaderKey(name)
+		lower := strings.ToLower(canonical)
+		if proxyHopByHopFramingHeaders[lower] {
+			return nil, fmt.Errorf("service %s: proxy.requestHeaders cannot set hop-by-hop or framing header %q", serviceName, canonical)
+		}
+		if proxyClientIdentityHeaders[lower] {
+			return nil, fmt.Errorf("service %s: proxy.requestHeaders cannot set client-identity header %q; client-identity headers are managed by the proxy", serviceName, canonical)
+		}
+		if strings.ContainsAny(value, "{}") {
+			return nil, fmt.Errorf("service %s: invalid proxy.requestHeaders value for %q: values must be literal (placeholders such as {http.request.host} are not supported)", serviceName, canonical)
+		}
+		if !isLiteralProxyRequestHeaderValue(value) {
+			return nil, fmt.Errorf("service %s: invalid proxy.requestHeaders value for %q: use 1-%d visible ASCII characters or spaces, without quotes, backslashes, or control characters", serviceName, canonical, proxyRequestHeaderMaxValueLen)
+		}
+		if _, exists := headers[canonical]; exists {
+			return nil, fmt.Errorf("service %s: duplicate proxy.requestHeaders name %q", serviceName, canonical)
+		}
+		headers[canonical] = value
+	}
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	return headers, nil
+}
+
+func isLiteralProxyRequestHeaderValue(value string) bool {
+	if value == "" || len(value) > proxyRequestHeaderMaxValueLen {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c < 0x20 || c > 0x7e || c == '{' || c == '}' || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateProxyPathPrefixes(serviceName, field string, values []string) ([]string, error) {

@@ -1,6 +1,9 @@
 package takod
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -196,6 +199,19 @@ func TestValidateProxyRoutePolicyRejectsUnsafeManifest(t *testing.T) {
 		{"bad body limit", ProxyRoute{MaxRequestBody: "10MiB"}, "request body"},
 		{"header injection", ProxyRoute{ResponseHeaders: map[string]string{"X-Test": "ok\r\nInjected: yes"}}, "response header"},
 		{"framing header", ProxyRoute{ResponseHeaders: map[string]string{"Content-Length": "1"}}, "framing"},
+		{"request header newline", ProxyRoute{RequestHeaders: map[string]string{"X-Test": "ok\nrespond 200"}}, "request header value"},
+		{"request header quote", ProxyRoute{RequestHeaders: map[string]string{"X-Test": `ok" respond 200`}}, "request header value"},
+		{"request header placeholder", ProxyRoute{RequestHeaders: map[string]string{"X-Forwarded-Host": "{http.request.host}"}}, "request header value"},
+		{"request header backslash", ProxyRoute{RequestHeaders: map[string]string{"X-Test": `a\b`}}, "request header value"},
+		{"request header padded", ProxyRoute{RequestHeaders: map[string]string{"X-Test": " a"}}, "request header value"},
+		{"request header host", ProxyRoute{RequestHeaders: map[string]string{"host": "evil.example.com"}}, "hop-by-hop or framing"},
+		{"request header http2-settings", ProxyRoute{RequestHeaders: map[string]string{"Http2-Settings": "AAMAAABkAAQAAP__"}}, "hop-by-hop or framing"},
+		{"request header xff", ProxyRoute{RequestHeaders: map[string]string{"x-forwarded-for": "1.2.3.4"}}, "client-identity"},
+		{"request header x-real-ip", ProxyRoute{RequestHeaders: map[string]string{"X-Real-IP": "1.2.3.4"}}, "client-identity"},
+		{"request header forwarded", ProxyRoute{RequestHeaders: map[string]string{"Forwarded": "for=1.2.3.4"}}, "client-identity"},
+		{"request header name", ProxyRoute{RequestHeaders: map[string]string{"X Test": "a"}}, "request header name"},
+		{"request header duplicate", ProxyRoute{RequestHeaders: map[string]string{"X-Test": "a", "x-test": "b"}}, "duplicate request header"},
+		{"too many request headers", ProxyRoute{RequestHeaders: manyRequestHeaders(33)}, "too many request headers"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -205,6 +221,57 @@ func TestValidateProxyRoutePolicyRejectsUnsafeManifest(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tt.needle)
 			}
 		})
+	}
+}
+
+func manyRequestHeaders(count int) map[string]string {
+	headers := make(map[string]string, count)
+	for i := 0; i < count; i++ {
+		headers["X-Header-"+strings.Repeat("a", i+1)] = "v"
+	}
+	return headers
+}
+
+func TestValidateProxyRouteRequestHeadersCanonicalizes(t *testing.T) {
+	manifest := accessControlManifest(ProxyRoute{RequestHeaders: map[string]string{"x-forwarded-host": "www.example.com"}})[0]
+	if err := validateProxyRouteManifest(&manifest); err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.Routes[0].RequestHeaders; len(got) != 1 || got["X-Forwarded-Host"] != "www.example.com" {
+		t.Fatalf("request headers were not canonicalized: %#v", got)
+	}
+	exact := accessControlManifest(ProxyRoute{RequestHeaders: manyRequestHeaders(32)})[0]
+	if err := validateProxyRouteManifest(&exact); err != nil {
+		t.Fatalf("32 request headers rejected: %v", err)
+	}
+}
+
+func TestWriteProxyFileRejectsHandCraftedRequestHeaderInjection(t *testing.T) {
+	useTempProxyPaths(t)
+	valid := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://demo-web:3000"]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo-production.json", Content: valid}); err != nil {
+		t.Fatalf("WriteProxyFile(valid) returned error: %v", err)
+	}
+	before, err := os.ReadFile(proxyCaddyfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{`ok\nrespond 200`, `ok\" respond 200`, `{http.request.host}`} {
+		injected := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://demo-web:3000"],"requestHeaders":{"X-Forwarded-Host":"` + value + `"}}]}`
+		if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo-production.json", Content: injected}); err == nil {
+			t.Fatalf("hand-crafted request header %q was accepted", value)
+		}
+		after, err := os.ReadFile(proxyCaddyfilePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Fatalf("rejected manifest changed the Caddyfile:\n%s", after)
+		}
+		stored, err := os.ReadFile(filepath.Join(proxyRoutesDir, "demo-production.json"))
+		if err != nil || string(stored) != valid {
+			t.Fatalf("rejected manifest replaced the stored route file: %q (%v)", stored, err)
+		}
 	}
 }
 

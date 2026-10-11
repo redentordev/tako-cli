@@ -189,6 +189,10 @@ const CapabilityServiceFilesV1 = "service.files-v1"
 // trusted proxy CIDRs and render Caddy's trusted client IP handling.
 const CapabilityProxyTrustedProxiesV1 = "proxy.trusted-proxies-v1"
 
+// CapabilityProxyRequestHeadersV1 means route manifests accept validated
+// literal upstream request headers and render them as Caddy header_up.
+const CapabilityProxyRequestHeadersV1 = "proxy.request-headers-v1"
+
 // CapabilityProxyRemoteMeshRoutesV1 will be advertised only when the node can
 // validate authoritative active allocation generations and revocations. Phase
 // 3 intentionally omits it so unsupported multi-node routes fail preflight.
@@ -2633,7 +2637,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityProxyCertStatusV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyRequestHeadersV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityProxyCertStatusV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

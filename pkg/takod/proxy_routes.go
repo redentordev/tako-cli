@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path"
@@ -96,6 +97,7 @@ type ProxyRoute struct {
 	AllowPathPrefixes []string             `json:"allowPathPrefixes,omitempty"`
 	MaxRequestBody    string               `json:"maxRequestBody,omitempty"`
 	ResponseHeaders   map[string]string    `json:"responseHeaders,omitempty"`
+	RequestHeaders    map[string]string    `json:"requestHeaders,omitempty"`
 	Destinations      []ProxyDestination   `json:"destinations,omitempty"`
 }
 
@@ -1015,11 +1017,21 @@ func writeCaddyReverseProxy(b *strings.Builder, indent string, address string, r
 	for _, upstream := range route.Upstreams {
 		b.WriteString(" " + upstream)
 	}
-	if route.HealthCheck == nil && !route.Sticky {
+	if route.HealthCheck == nil && !route.Sticky && len(route.RequestHeaders) == 0 {
 		b.WriteString("\n")
 		return
 	}
 	b.WriteString(" {\n")
+	if len(route.RequestHeaders) > 0 {
+		names := make([]string, 0, len(route.RequestHeaders))
+		for name := range route.RequestHeaders {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			b.WriteString(indent + "\theader_up " + name + " " + strconv.Quote(route.RequestHeaders[name]) + "\n")
+		}
+	}
 	if route.HealthCheck != nil && route.HealthCheck.Path != "" {
 		b.WriteString(indent + "\thealth_uri " + route.HealthCheck.Path + "\n")
 		if route.HealthCheck.Interval != "" {
@@ -1092,11 +1104,7 @@ func validateProxyRoutePolicy(route *ProxyRoute) error {
 	if len(route.ResponseHeaders) > 64 {
 		return fmt.Errorf("too many response headers")
 	}
-	forbidden := map[string]bool{
-		"connection": true, "content-length": true, "host": true, "http2-settings": true,
-		"keep-alive": true, "proxy-authenticate": true, "proxy-authorization": true,
-		"proxy-connection": true, "te": true, "trailer": true, "transfer-encoding": true, "upgrade": true,
-	}
+	forbidden := proxyRouteHopByHopFramingHeaders
 	headers := make(map[string]string, len(route.ResponseHeaders))
 	for name, value := range route.ResponseHeaders {
 		if name == "" || len(name) > 128 || !proxyRouteHeaderNamePattern.MatchString(name) || value == "" || len(value) > 4096 || pathHasControlChars(value) {
@@ -1116,7 +1124,70 @@ func validateProxyRoutePolicy(route *ProxyRoute) error {
 	} else {
 		route.ResponseHeaders = headers
 	}
+	requestHeaders, err := validateProxyRouteRequestHeaders(route.RequestHeaders)
+	if err != nil {
+		return err
+	}
+	route.RequestHeaders = requestHeaders
 	return nil
+}
+
+// proxyRouteHopByHopFramingHeaders mirrors the CLI list shared by
+// responseHeaders and requestHeaders.
+var proxyRouteHopByHopFramingHeaders = map[string]bool{
+	"connection": true, "content-length": true, "host": true, "http2-settings": true,
+	"keep-alive": true, "proxy-authenticate": true, "proxy-authorization": true,
+	"proxy-connection": true, "te": true, "trailer": true, "transfer-encoding": true, "upgrade": true,
+}
+
+// proxyRouteClientIdentityHeaders are request headers managed by Caddy so the
+// upstream keeps seeing the real client IP.
+var proxyRouteClientIdentityHeaders = map[string]bool{
+	"x-forwarded-for": true, "forwarded": true, "x-real-ip": true,
+}
+
+func validateProxyRouteRequestHeaders(source map[string]string) (map[string]string, error) {
+	if len(source) > 32 {
+		return nil, fmt.Errorf("too many request headers")
+	}
+	headers := make(map[string]string, len(source))
+	for name, value := range source {
+		if name == "" || len(name) > 128 || !proxyRouteHeaderNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("invalid request header name %q", name)
+		}
+		canonical := textproto.CanonicalMIMEHeaderKey(name)
+		lower := strings.ToLower(canonical)
+		if proxyRouteHopByHopFramingHeaders[lower] {
+			return nil, fmt.Errorf("request header %q is a hop-by-hop or framing header", canonical)
+		}
+		if proxyRouteClientIdentityHeaders[lower] {
+			return nil, fmt.Errorf("request header %q is a client-identity header managed by the proxy", canonical)
+		}
+		if !isLiteralProxyRouteHeaderValue(value) {
+			return nil, fmt.Errorf("invalid request header value for %q", canonical)
+		}
+		if _, exists := headers[canonical]; exists {
+			return nil, fmt.Errorf("duplicate request header %q", canonical)
+		}
+		headers[canonical] = value
+	}
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	return headers, nil
+}
+
+func isLiteralProxyRouteHeaderValue(value string) bool {
+	if value == "" || len(value) > 1024 || value != strings.TrimSpace(value) {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c < 0x20 || c > 0x7e || c == '{' || c == '}' || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateProxyRoutePathPrefixes(label string, values []string) ([]string, error) {

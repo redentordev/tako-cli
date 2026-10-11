@@ -97,6 +97,7 @@ type DesiredService struct {
 	ProxyBasicAuthConfigured bool                           `json:"proxyBasicAuthConfigured,omitempty"`
 	ProxyBasicAuthUsername   string                         `json:"proxyBasicAuthUsername,omitempty"`
 	ProxyResponseHeaderNames []string                       `json:"proxyResponseHeaderNames,omitempty"`
+	ProxyRequestHeaderNames  []string                       `json:"proxyRequestHeaderNames,omitempty"`
 	Volumes                  []string                       `json:"volumes,omitempty"`
 	Files                    []config.ServiceFileConfig     `json:"files,omitempty"`
 	EnvKeys                  []string                       `json:"envKeys,omitempty"`
@@ -842,6 +843,7 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		ProxyBasicAuthConfigured: service.Proxy != nil && service.Proxy.BasicAuth != nil,
 		ProxyBasicAuthUsername:   proxyBasicAuthUsername(service.Proxy),
 		ProxyResponseHeaderNames: proxyResponseHeaderNames(service.Proxy),
+		ProxyRequestHeaderNames:  proxyRequestHeaderNames(service.Proxy),
 		Volumes:                  sortedCopy(service.Volumes),
 		Files:                    append([]config.ServiceFileConfig(nil), service.Files...),
 		EnvKeys:                  sortedKeys(service.Env),
@@ -881,6 +883,7 @@ func cloneProxyConfig(source *config.ProxyConfig) *config.ProxyConfig {
 	clone.DenyPathPrefixes = append([]string(nil), source.DenyPathPrefixes...)
 	clone.AllowPathPrefixes = append([]string(nil), source.AllowPathPrefixes...)
 	clone.ResponseHeaders = nil
+	clone.RequestHeaders = nil
 	if source.BasicAuth != nil {
 		clone.BasicAuth = nil
 	}
@@ -907,6 +910,13 @@ func proxyResponseHeaderNames(proxy *config.ProxyConfig) []string {
 		return nil
 	}
 	return sortedKeys(proxy.ResponseHeaders)
+}
+
+func proxyRequestHeaderNames(proxy *config.ProxyConfig) []string {
+	if proxy == nil {
+		return nil
+	}
+	return sortedKeys(proxy.RequestHeaders)
 }
 
 func stateStringOrList(value config.StringOrList) (string, []string) {

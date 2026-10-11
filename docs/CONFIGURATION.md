@@ -1175,6 +1175,63 @@ deferred so they replace upstream values. HTTP hop-by-hop and
 message-framing headers such as `Connection`, `Content-Length`, and
 `Transfer-Encoding` cannot be overridden.
 
+### Behind a CDN
+
+A CDN such as CloudFront usually connects to the origin with the origin
+hostname in `Host`, because it needs that name for TLS to the origin. The app
+then sees `https://origin.example.com` as its own URL, and frameworks that
+compare `Origin` with the request URL (Astro `checkOrigin`, CSRF middleware)
+reject the site's own form posts with 403.
+
+#### CloudFront: pin the public host
+
+Set `X-Forwarded-Host` to the public hostname with `proxy.requestHeaders`. Caddy
+sends it to the upstream on every request, replacing whatever the client or
+CDN sent, so the app reconstructs its public URL without trusting any CDN
+address range:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: origin.example.com
+          cdn: generic
+          requestHeaders:
+            X-Forwarded-Host: www.example.com
+            X-Forwarded-Proto: https
+```
+
+`requestHeaders` sets literal headers on the request forwarded to the service
+(Caddy `header_up`) on public and internal routes. An explicit
+`X-Forwarded-Host` or `X-Forwarded-Proto` overrides Caddy's default for that
+service only. The rules, enforced by the CLI and again by `takod`:
+
+- At most 32 entries. Names are at most 128 characters of letters, digits, and
+  `-`, and are canonicalized (`x-forwarded-host` becomes `X-Forwarded-Host`);
+  two names that canonicalize to the same header are an error.
+- Values are 1-1024 visible ASCII characters or spaces, without surrounding
+  whitespace, control characters, `"`, or `\`. Values are literal: Caddy
+  placeholders such as `{http.request.host}` (any `{` or `}`) are rejected.
+- Hop-by-hop and framing headers (`Connection`, `Keep-Alive`,
+  `Proxy-Connection`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`,
+  `Trailer`, `Transfer-Encoding`, `Upgrade`, `Http2-Settings`,
+  `Content-Length`, `Host`) and client-identity headers (`X-Forwarded-For`,
+  `Forwarded`, `X-Real-IP`) cannot be set. The proxy manages client identity,
+  so the app and logs keep seeing the real client IP.
+
+These headers are sent on **every** request to the service, so do not use them
+to assert identity or privileges (for example `X-User: admin`) unless every
+request through this route really should carry that value. Like
+`responseHeaders`, their values are not stored in the replicated desired
+state; `tako config export` writes `REDACTED` placeholders. The setting requires
+agents advertising `proxy.request-headers-v1`; deploys fail before mutation on
+older agents.
+
 ### Bring-your-own TLS certificates
 
 Push a pre-issued public or origin certificate to every proxy node in the

@@ -181,6 +181,70 @@ func TestValidateProxyRoutePolicyRejectsUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestValidateProxyRequestHeadersAllowedOnPublicAndInternal(t *testing.T) {
+	for _, internal := range []bool{false, true} {
+		cfg := proxyAccessValidationConfig(func(p *ProxyConfig) {
+			if internal {
+				p.Domain = ""
+				p.Visibility = ProxyVisibilityInternal
+			}
+			p.RequestHeaders = map[string]string{"x-forwarded-host": "www.example.com", "X-Tenant": "acme corp"}
+		})
+		if err := ValidateConfig(cfg); err != nil {
+			t.Fatalf("internal=%v: ValidateConfig returned error: %v", internal, err)
+		}
+		got := cfg.Environments["production"].Services["web"].Proxy.RequestHeaders
+		if got["X-Forwarded-Host"] != "www.example.com" || got["X-Tenant"] != "acme corp" || len(got) != 2 {
+			t.Fatalf("internal=%v: requestHeaders not canonicalized: %#v", internal, got)
+		}
+	}
+}
+
+func TestValidateProxyRequestHeadersRejectsUnsafeEntries(t *testing.T) {
+	tooMany := make(map[string]string, 33)
+	for i := 0; i < 33; i++ {
+		tooMany["X-Header-"+strings.Repeat("a", i+1)] = "v"
+	}
+	tests := []struct {
+		name    string
+		headers map[string]string
+		wantErr string
+	}{
+		{"host", map[string]string{"Host": "example.com"}, "framing"},
+		{"host lowercase", map[string]string{"host": "example.com"}, "framing"},
+		{"content-length", map[string]string{"Content-Length": "1"}, "framing"},
+		{"http2-settings", map[string]string{"http2-settings": "AAMAAABkAAQAAP__"}, "hop-by-hop"},
+		{"upgrade", map[string]string{"UPGRADE": "websocket"}, "hop-by-hop"},
+		{"te", map[string]string{"te": "trailers"}, "hop-by-hop"},
+		{"x-forwarded-for", map[string]string{"x-forwarded-for": "1.2.3.4"}, "client-identity headers are managed by the proxy"},
+		{"forwarded", map[string]string{"FORWARDED": "for=1.2.3.4"}, "client-identity"},
+		{"x-real-ip", map[string]string{"X-Real-IP": "1.2.3.4"}, "client-identity"},
+		{"placeholder", map[string]string{"X-Forwarded-Host": "{http.request.host}"}, "values must be literal"},
+		{"closing brace", map[string]string{"X-Test": "a}"}, "literal"},
+		{"quote", map[string]string{"X-Test": `a"b`}, "requestHeaders value"},
+		{"backslash", map[string]string{"X-Test": `a\b`}, "requestHeaders value"},
+		{"newline", map[string]string{"X-Test": "a\nb"}, "requestHeaders value"},
+		{"tab", map[string]string{"X-Test": "a\tb"}, "requestHeaders value"},
+		{"non-ascii", map[string]string{"X-Test": "café"}, "requestHeaders value"},
+		{"empty value", map[string]string{"X-Test": ""}, "requestHeaders value"},
+		{"long value", map[string]string{"X-Test": strings.Repeat("a", 1025)}, "requestHeaders value"},
+		{"padded value", map[string]string{"X-Test": " a"}, "whitespace"},
+		{"bad name", map[string]string{"Bad Header": "v"}, "requestHeaders name"},
+		{"long name", map[string]string{strings.Repeat("a", 129): "v"}, "requestHeaders name"},
+		{"duplicate", map[string]string{"X-Test": "one", "x-test": "two"}, "duplicate"},
+		{"too many", tooMany, "at most 32"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := proxyAccessValidationConfig(func(p *ProxyConfig) { p.RequestHeaders = tt.headers })
+			err := ValidateConfig(cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateResourcesCPUs(t *testing.T) {
 	for _, good := range []string{"0.5", "2", "1.25"} {
 		cfg := proxyAccessValidationConfig(nil)

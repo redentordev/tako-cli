@@ -658,6 +658,61 @@ func TestRenderTakodProxyDynamicConfigCarriesAccessControls(t *testing.T) {
 	assertStringsEqual(t, route.TrustedProxies, []string{"10.0.0.0/8", "2001:db8::/32"})
 }
 
+func TestRenderTakodProxyDynamicConfigCarriesRequestHeaders(t *testing.T) {
+	deploy := testProxyDeployer()
+	services := deploy.config.Environments["production"].Services
+	web := services["web"]
+	web.Proxy = &config.ProxyConfig{
+		Domain:         "example.com",
+		RequestHeaders: map[string]string{"X-Forwarded-Host": "www.example.com"},
+	}
+	services["web"] = web
+
+	data, _, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	manifest := parseProxyManifest(t, data)
+	if manifest.Version != 1 && manifest.Version != 2 {
+		t.Fatalf("requestHeaders must not bump the manifest version, got %d", manifest.Version)
+	}
+	route := onlyProxyRoute(t, manifest)
+	if len(route.RequestHeaders) != 1 || route.RequestHeaders["X-Forwarded-Host"] != "www.example.com" {
+		t.Fatalf("requestHeaders = %#v", route.RequestHeaders)
+	}
+}
+
+func TestProxyRequestHeadersRequireDedicatedCapabilityOnlyWhenUsed(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"web": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "example.com", RequestHeaders: map[string]string{"X-Forwarded-Host": "www.example.com"}}},
+	}
+	requirements := takodProxyCapabilityRequirements(services)
+	if len(requirements) != 1 || requirements[0].Capability != takod.CapabilityProxyRequestHeadersV1 {
+		t.Fatalf("requirements = %+v", requirements)
+	}
+	if got := takodProxyCapabilityRequirements(map[string]config.ServiceConfig{
+		"web": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "example.com"}},
+	}); len(got) != 0 {
+		t.Fatalf("unused requestHeaders added requirements %+v", got)
+	}
+	mutations := 0
+	err := runTakodProxyReconcile(func() error {
+		return preflightTakodProxyRequirements([]string{"node-a"}, requirements, func(server string, requirement takodProxyCapabilityRequirement) error {
+			return &takodclient.CapabilityRequiredError{Server: server, Capability: requirement.Capability, Feature: requirement.Feature}
+		})
+	}, func() error {
+		mutations++
+		return nil
+	})
+	var capabilityErr *takodclient.CapabilityRequiredError
+	if !errors.As(err, &capabilityErr) || capabilityErr.Capability != takod.CapabilityProxyRequestHeadersV1 || !strings.Contains(err.Error(), "tako upgrade servers") {
+		t.Fatalf("preflight error = %v", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("mutations = %d, want zero", mutations)
+	}
+}
+
 func TestProxyServicesUseTrustedProxiesOnlyForProxiedServices(t *testing.T) {
 	if proxyServicesUseTrustedProxies(map[string]config.ServiceConfig{
 		"web": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "example.com", TrustedProxies: []string{"10.0.0.0/8"}}},

@@ -549,6 +549,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			AllowPathPrefixes: append([]string(nil), service.Proxy.AllowPathPrefixes...),
 			MaxRequestBody:    service.Proxy.MaxRequestBody,
 			ResponseHeaders:   cloneProxyResponseHeaders(service.Proxy.ResponseHeaders),
+			RequestHeaders:    cloneProxyResponseHeaders(service.Proxy.RequestHeaders),
 			Destinations:      destinations,
 		}
 		if auth := service.Proxy.BasicAuth; auth != nil {
@@ -624,6 +625,15 @@ func proxyServicesUseRoutePolicy(services map[string]config.ServiceConfig) bool 
 	return false
 }
 
+func proxyServicesUseRequestHeaders(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.IsProxied() && service.Proxy != nil && len(service.Proxy.RequestHeaders) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func proxyServicesUseAllowPathPrefixes(services map[string]config.ServiceConfig) bool {
 	for _, service := range services {
 		if service.IsProxied() && service.Proxy != nil && len(service.Proxy.AllowPathPrefixes) > 0 {
@@ -673,6 +683,9 @@ func takodProxyCapabilityRequirements(services map[string]config.ServiceConfig) 
 	}
 	if proxyServicesUseRoutePolicy(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyRoutePolicyV1, Feature: "proxy route policy"})
+	}
+	if proxyServicesUseRequestHeaders(services) {
+		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyRequestHeadersV1, Feature: "proxy request headers"})
 	}
 	if proxyServicesUseAllowPathPrefixes(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyAllowPathPrefixesV1, Feature: "proxy allow path prefixes"})

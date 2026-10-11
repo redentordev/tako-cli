@@ -812,7 +812,9 @@ See [Rollback](#rollback).
 - Deployment records store env **keys** only (`<redacted>` values).
 - Generated configs (`tako config export`) redact SSH passwords, environment
   values, volume driver options and labels, proxy basic-auth verifiers, and
-  custom response-header values. Warnings identify every value that must be
+  custom response- and request-header values. Warnings
+  (`proxy_response_header_values_redacted`,
+  `proxy_request_header_values_redacted`) identify every value that must be
   restored before deploying the export.
 
 Do not log stderr blindly: build logs may echo application output that

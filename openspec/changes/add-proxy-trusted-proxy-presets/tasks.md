@@ -2,20 +2,20 @@
 
 ## 1. PR1: requestHeaders (no network; fixes #116)
 
-- [ ] 1.1 Add `RequestHeaders map[string]string` to `ProxyConfig` (`pkg/config/types.go:554-613`). Validate it per D4 in `pkg/config/validator.go`, sharing the name pattern, the 128-character limit and the hop-by-hop/framing list with `responseHeaders` (`:2324-2351`), and adding the client-identity names. Allow it on internal proxies. Verify with table tests in `pkg/config/proxy_access_test.go`:
+- [x] 1.1 Add `RequestHeaders map[string]string` to `ProxyConfig` (`pkg/config/types.go:554-613`). Validate it per D4 in `pkg/config/validator.go`, sharing the name pattern, the 128-character limit and the hop-by-hop/framing list with `responseHeaders` (`:2324-2351`), and adding the client-identity names. Allow it on internal proxies. Verify with table tests in `pkg/config/proxy_access_test.go`:
   - allowed `X-Forwarded-Host`, on both a public and an internal proxy;
   - forbidden names, including case variants and `Http2-Settings`;
   - values with placeholders, quotes, backslashes or control characters;
   - a duplicate after canonicalization;
   - more than 32 entries.
-- [ ] 1.2 Add `RequestHeaders` to `takod.ProxyRoute` (`pkg/takod/proxy_routes.go:81-100`). Mirror the validation in takod `validateProxyRoutePolicy` (`:1072`), using the same lists. Render sorted `header_up` lines quoted with `strconv.Quote` in `writeCaddyReverseProxy` (`:1013`). Verify with:
+- [x] 1.2 Add `RequestHeaders` to `takod.ProxyRoute` (`pkg/takod/proxy_routes.go:81-100`). Mirror the validation in takod `validateProxyRoutePolicy` (`:1072`), using the same lists. Render sorted `header_up` lines quoted with `strconv.Quote` in `writeCaddyReverseProxy` (`:1013`). Verify with:
   - `proxy_file_test.go` contains and forbidden cases;
   - a golden Caddyfile;
   - a hand-crafted manifest containing `{`, `"` or a newline, which is rejected;
   - configs without the field rendering byte-identical.
-- [ ] 1.3 Add `CapabilityProxyRequestHeadersV1` (`pkg/takod/server.go`), advertise it, and require it in `takodProxyCapabilityRequirements` (`pkg/deployer/takod_proxy.go:669`) only when used. Do not bump the manifest version (D4). Verify with capability preflight tests (`takod_proxy_test.go:941-973` pattern), including an old-takod case that fails before mutation.
-- [ ] 1.4 Update `schema/tako.schema.json` (`:1121` area) for `requestHeaders`. Verify with the schema tests.
-- [ ] 1.5 Docs: add a "Behind a CDN" section to `docs/CONFIGURATION.md` (~:1020-1094) with the CloudFront recipe (`requestHeaders: {X-Forwarded-Host: <public host>}`) and a note that these headers are sent on every request. Verify the example with `tako config validate`.
+- [x] 1.3 Add `CapabilityProxyRequestHeadersV1` (`pkg/takod/server.go`), advertise it, and require it in `takodProxyCapabilityRequirements` (`pkg/deployer/takod_proxy.go:669`) only when used. Do not bump the manifest version (D4). Verify with capability preflight tests (`takod_proxy_test.go:941-973` pattern), including an old-takod case that fails before mutation.
+- [x] 1.4 Update `schema/tako.schema.json` (`:1121` area) for `requestHeaders`. Verify with the schema tests.
+- [x] 1.5 Docs: add a "Behind a CDN" section to `docs/CONFIGURATION.md` (~:1020-1094) with the CloudFront recipe (`requestHeaders: {X-Forwarded-Host: <public host>}`) and a note that these headers are sent on every request. Verify the example with `tako config validate`.
 
 ## 2. PR2: Preset resolution
 

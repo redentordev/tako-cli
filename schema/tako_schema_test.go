@@ -173,6 +173,32 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 			t.Fatalf("responseHeaders forbidden-name schema misses %q", value)
 		}
 	}
+	requestHeaders := schemaPath(t, proxyProperties, "requestHeaders")
+	if requestHeaders["maxProperties"] != float64(32) {
+		t.Fatalf("requestHeaders schema = %#v", requestHeaders)
+	}
+	requestForbidden := regexp.MustCompile(schemaPath(t, requestHeaders, "propertyNames", "not")["pattern"].(string))
+	for _, value := range []string{"Host", "http2-settings", "X-Forwarded-For", "x-real-ip", "FORWARDED", "Transfer-Encoding"} {
+		if !requestForbidden.MatchString(value) {
+			t.Fatalf("requestHeaders forbidden-name schema misses %q", value)
+		}
+	}
+	for _, value := range []string{"X-Forwarded-Host", "X-Forwarded-Proto", "X-Tenant"} {
+		if requestForbidden.MatchString(value) {
+			t.Fatalf("requestHeaders forbidden-name schema rejects %q", value)
+		}
+	}
+	requestValue := regexp.MustCompile(schemaPath(t, requestHeaders, "additionalProperties")["pattern"].(string))
+	for _, value := range []string{"www.example.com", "https", "a b", "x"} {
+		if !requestValue.MatchString(value) {
+			t.Fatalf("requestHeaders value schema rejects %q", value)
+		}
+	}
+	for _, value := range []string{"{http.request.host}", `a"b`, `a\b`, " a", "a ", "a\nb", "a\tb", "café"} {
+		if requestValue.MatchString(value) {
+			t.Fatalf("requestHeaders value schema accepts %q", value)
+		}
+	}
 	acme := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "proxy", "properties", "acme")
 	conditions, ok := acme["allOf"].([]any)
 	if !ok || len(conditions) != 1 {
