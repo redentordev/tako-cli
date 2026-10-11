@@ -158,7 +158,7 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error)
 		TimeoutSeconds: int(timeout / time.Second),
 	}
 	if req.OneOff {
-		envContent, err := buildExecEnvFileContent(e, envName, &service)
+		envContent, err := buildExecEnvFileContent(e, cfg, envName, &service)
 		if err != nil {
 			return nil, err
 		}
@@ -315,11 +315,11 @@ func (e *Engine) resolveExecServer(ctx context.Context, cfg *config.Config, envN
 
 // buildExecEnvFileContent renders the service's env/secrets exactly as a
 // deploy would, registering secret values with the event redactor first.
-func buildExecEnvFileContent(e *Engine, envName string, service *config.ServiceConfig) (string, error) {
+func buildExecEnvFileContent(e *Engine, cfg *config.Config, envName string, service *config.ServiceConfig) (string, error) {
 	if len(service.Env) == 0 && len(service.Secrets) == 0 && service.EnvFile == "" && len(service.EnvFiles) == 0 {
 		return "", nil
 	}
-	mgr, err := secrets.NewManager(envName)
+	mgr, err := secrets.NewManagerForConfig(cfg, envName)
 	if err != nil {
 		return "", fmt.Errorf("failed to create secrets manager: %w", err)
 	}
@@ -342,14 +342,14 @@ func buildExecEnvFileContent(e *Engine, envName string, service *config.ServiceC
 // registerServiceSecretValues adds every referenced secret value to the
 // event redactor so streamed output (logs, exec, release commands) never
 // carries plaintext secrets.
-func (e *Engine) registerServiceSecretValues(envName string, services map[string]config.ServiceConfig) {
+func (e *Engine) registerServiceSecretValues(cfg *config.Config, envName string, services map[string]config.ServiceConfig) {
 	var mgr *secrets.Manager
 	for _, service := range services {
 		if len(service.Secrets) == 0 {
 			continue
 		}
 		if mgr == nil {
-			created, err := secrets.NewManager(envName)
+			created, err := secrets.NewManagerForConfig(cfg, envName)
 			if err != nil {
 				return
 			}

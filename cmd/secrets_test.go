@@ -117,7 +117,7 @@ environments:
 }
 
 func TestImportedSecretKeyStripsPrefixAndNormalizesPath(t *testing.T) {
-	got := importedSecretKey("/truenextglobal/production/twenty/database-url", "/truenextglobal/production/")
+	got := secrets.ProviderSecretKey("/truenextglobal/production/twenty/database-url", "/truenextglobal/production/")
 	if got != "TWENTY_DATABASE_URL" {
 		t.Fatalf("importedSecretKey = %q, want TWENTY_DATABASE_URL", got)
 	}
@@ -131,12 +131,12 @@ func TestMapImportedSecretsUsesExplicitMappingsAndRejectsCollisions(t *testing.T
 		"/app/prod/custom/name": "four",
 	}
 
-	_, err := mapImportedSecrets(values, "/app/prod/", nil)
+	_, err := secrets.MapProviderSecrets(values, "/app/prod/", nil)
 	if err == nil {
 		t.Fatal("expected collision without explicit mapping")
 	}
 
-	got, err := mapImportedSecrets(values, "/app/prod/", map[string]string{
+	got, err := secrets.MapProviderSecrets(values, "/app/prod/", map[string]string{
 		"/app/prod/db-url":      "DATABASE_URL_ALT",
 		"/app/prod/custom/name": "CUSTOM_NAME",
 	})

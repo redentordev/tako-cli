@@ -36,6 +36,9 @@ type Config struct {
 	// are request-scoped: they ride individual pull/build requests and are
 	// never persisted on nodes.
 	Registries map[string]RegistryConfig `yaml:"registries,omitempty" json:"registries,omitempty"`
+	// SecretSources are external secret stores read at deploy time for every
+	// environment; see SecretSource.
+	SecretSources []SecretSource `yaml:"secretSources,omitempty" json:"secretSources,omitempty"`
 
 	Servers      map[string]ServerConfig      `yaml:"servers" json:"servers"`
 	Environments map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
@@ -747,6 +750,7 @@ type EnvironmentConfig struct {
 	Proxy          *EnvironmentProxyConfig  `yaml:"proxy,omitempty" json:"proxy,omitempty"`                   // Environment-level proxy placement
 	Labels         map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`                 // Environment labels for nodes
 	Services       map[string]ServiceConfig `yaml:"services" json:"services"`                                 // Services to deploy in this environment
+	SecretSources  []SecretSource           `yaml:"secretSources,omitempty" json:"secretSources,omitempty"`   // Environment-specific external secret stores
 }
 
 // EnvironmentProxyConfig controls where environment-level proxy routes are

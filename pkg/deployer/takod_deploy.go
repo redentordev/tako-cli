@@ -2013,7 +2013,7 @@ func (d *Deployer) buildTakodEnvFileContentAndHash(service *config.ServiceConfig
 		return "", runInputValuesHash(nil), nil
 	}
 
-	secretsMgr, err := secrets.NewManager(d.environment)
+	secretsMgr, err := secrets.NewManagerForConfig(d.config, d.environment)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create secrets manager: %w", err)
 	}

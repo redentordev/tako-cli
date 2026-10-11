@@ -55,6 +55,12 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 			t.Fatalf("backup endpoint schema accepts %q", endpoint)
 		}
 	}
+	schemaPath(t, schema, "properties", "secretSources")
+	schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "secretSources")
+	secretSourceProperties := schemaPath(t, schema, "definitions", "secretSources", "items", "properties")
+	for _, field := range []string{"provider", "names", "path", "from", "profile", "region", "vault", "project", "providerEnv", "prefixStrip", "map"} {
+		schemaPath(t, secretSourceProperties, field)
+	}
 	sharedBuildProperties := schemaPath(t, schema, "properties", "builds", "additionalProperties", "properties")
 	for _, field := range []string{"context", "args", "target", "dockerfile"} {
 		schemaPath(t, sharedBuildProperties, field)
