@@ -77,3 +77,62 @@ func TestPostDeployCleanupKeepsPreviewSharedServerRule(t *testing.T) {
 		t.Fatalf("no upgrade warning for a preview skip: %+v", sink.ofType(events.TypeWarning))
 	}
 }
+
+func TestCleanupNodeAdaptsToNodeCapabilities(t *testing.T) {
+	cfg := previewTestConfig("new-1", "old-1")
+	request := takod.CleanupRequest{
+		Project:                "demo",
+		Environment:            "production",
+		ImageRepositories:      []string{"demo/web"},
+		KeepImages:             5,
+		CleanOldImages:         true,
+		CleanStoppedContainers: true,
+		CleanUnusedVolumes:     true,
+	}
+	capable := &fakePreviewNode{capabilities: []string{takod.CapabilityNodeDiskHygieneV1}}
+	old := &fakePreviewNode{capabilities: []string{takod.CapabilityPreviewLifecycleV1}}
+
+	_, notices, err := CleanupNode(context.Background(), old, cfg, "old-1", request, false)
+	if err != nil || len(notices) != 1 || !strings.Contains(notices[0], "old-image removal skipped on old-1") || !strings.Contains(notices[0], "tako upgrade servers") {
+		t.Fatalf("old node: notices=%q err=%v", notices, err)
+	}
+	sent := old.cleanupRequests()
+	if len(sent) != 1 || sent[0].CleanOldImages || !sent[0].CleanStoppedContainers || !sent[0].CleanUnusedVolumes || sent[0].Trigger != "" {
+		t.Fatalf("old node request = %+v", sent)
+	}
+
+	_, notices, err = CleanupNode(context.Background(), capable, cfg, "new-1", request, false)
+	sent = capable.cleanupRequests()
+	if err != nil || len(notices) != 0 || len(sent) != 1 || !sent[0].CleanOldImages || sent[0].KeepImages != 5 || sent[0].Trigger != takod.HygieneTriggerCleanup {
+		t.Fatalf("capable node: notices=%q err=%v request=%+v", notices, err, sent)
+	}
+}
+
+func TestCleanupNodeDryRun(t *testing.T) {
+	cfg := previewTestConfig("new-1", "old-1")
+	request := takod.CleanupRequest{
+		Project:                "demo",
+		Environment:            "production",
+		ImageRepositories:      []string{"demo/web"},
+		KeepImages:             3,
+		CleanOldImages:         true,
+		CleanStoppedContainers: true,
+		CleanUnusedVolumes:     true,
+		SecureLogPermissions:   true,
+	}
+	old := &fakePreviewNode{}
+	if _, _, err := CleanupNode(context.Background(), old, cfg, "old-1", request, true); err == nil || !strings.Contains(err.Error(), "dry run not supported on old-1") {
+		t.Fatalf("old node dry run error = %v", err)
+	}
+	if len(old.cleanupRequests()) != 0 {
+		t.Fatalf("an old node must receive no cleanup request in a dry run: %+v", old.cleanupRequests())
+	}
+	capable := &fakePreviewNode{capabilities: []string{takod.CapabilityNodeDiskHygieneV1}}
+	if _, _, err := CleanupNode(context.Background(), capable, cfg, "new-1", request, true); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	sent := capable.cleanupRequests()
+	if len(sent) != 1 || !sent[0].DryRun || !sent[0].CleanOldImages || sent[0].CleanStoppedContainers || sent[0].CleanUnusedVolumes || sent[0].SecureLogPermissions {
+		t.Fatalf("dry run must send only an old-image dry-run request: %+v", sent)
+	}
+}

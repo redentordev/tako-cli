@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
 )
@@ -75,4 +76,47 @@ func (s *DeploySession) runPostDeployCleanup(ctx context.Context, clientFor func
 	if len(skipped) > 0 {
 		e.warn(events.PhaseCleanup, fmt.Sprintf("  Warning: old-image cleanup skipped on %s: node agent needs `tako upgrade servers`\n", strings.Join(skipped, ", ")))
 	}
+}
+
+// CleanupNode runs one node's `tako cleanup` request adapted to what the
+// node supports. With dryRun, only a node with node.disk-hygiene-v1 is
+// asked, with a separate old-image-only dry-run request; other nodes fail
+// with an upgrade hint. Without dryRun, a node lacking the capability has
+// old-image removal dropped from the request (the other steps still run)
+// and a notice names the skip.
+func CleanupNode(ctx context.Context, client any, cfg *config.Config, server string, request takod.CleanupRequest, dryRun bool) (*takod.CleanupResponse, []string, error) {
+	capable := false
+	if dryRun || request.CleanOldImages {
+		ok, err := takodHasCapability(ctx, client, cfg, takod.CapabilityNodeDiskHygieneV1)
+		if err != nil {
+			return nil, nil, err
+		}
+		capable = ok
+	}
+	if dryRun {
+		if !capable {
+			return nil, nil, fmt.Errorf("dry run not supported on %s: node agent needs `tako upgrade servers`", server)
+		}
+		response, err := CleanupViaTakodContext(ctx, client, cfg, takod.CleanupRequest{
+			Project:           request.Project,
+			Environment:       request.Environment,
+			ImageRepositories: request.ImageRepositories,
+			KeepImages:        request.KeepImages,
+			CleanOldImages:    true,
+			DryRun:            true,
+			Trigger:           takod.HygieneTriggerCleanup,
+		})
+		return response, nil, err
+	}
+	var notices []string
+	if request.CleanOldImages {
+		if capable {
+			request.Trigger = takod.HygieneTriggerCleanup
+		} else {
+			request.CleanOldImages = false
+			notices = append(notices, fmt.Sprintf("old-image removal skipped on %s: node agent needs `tako upgrade servers`", server))
+		}
+	}
+	response, err := CleanupViaTakodContext(ctx, client, cfg, request)
+	return response, notices, err
 }

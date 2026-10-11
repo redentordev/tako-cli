@@ -1,5 +1,7 @@
 package engine
 
+import "github.com/redentordev/tako-cli/pkg/takod"
+
 // KindActionResult identifies the minimal acknowledgement document emitted
 // by node-fanout maintenance operations (maintenance, live, cleanup).
 const KindActionResult = "ActionResult"
@@ -25,6 +27,10 @@ type ActionNodeOutcome struct {
 	Done     bool     `json:"done"`
 	Error    string   `json:"error,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// Hygiene is the node's old-image report for cleanup on nodes with
+	// node.disk-hygiene-v1: removed (or, with --dry-run, removable) images,
+	// kept counts by reason and bytes freed.
+	Hygiene *takod.CleanupHygiene `json:"hygiene,omitempty"`
 }
 
 // ActionResult is the serializable acknowledgement of maintenance, live,
