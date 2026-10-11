@@ -316,3 +316,9 @@ Differences from the plan above, chosen as the safest equivalent while implement
 - **Setup:** `RemoveLegacyMonitoringAgent` retries the capability guard 5 times, 2s apart, because takod has just restarted in the preceding step. If the guard is not met, the step completes and emits a setup warning. Converge runs it too.
 - **7.3 (manual live-server check)** was not performed in this environment. It is listed in the PR for a reviewer with server access.
 - **7.2 verification** ran on Windows: `go build ./...`, `GOOS=linux go vet ./...`, and `go test` for the touched packages that compile on Windows. The Linux-only `pkg/takod` tests run in CI.
+- **Review follow-ups (ops integration):**
+  - *Monotonic counters.* The `*_total` network and disk I/O counters advance from one counter baseline that both the periodic tick and `collect=true` share. A snapshot that is not newer than the baseline is ignored, so totals never go backwards.
+  - *Torn history lines.* An append to a segment whose last byte is not a newline starts with a newline, so a record written after a crash is never merged into the torn fragment.
+  - *`apt-get -s dist-upgrade`* is the simulation, so updates that need new or removed packages (for example kernels) are counted.
+  - *`--metrics-interval 0`* drops a persisted `metrics-collector` condition instead of keeping it failing forever.
+  - *Filesystem identity.* Two paths are the same filesystem when they share a non-zero statfs `Fsid` or a `st_dev`. On btrfs, where each subvolume has its own `Fsid` and `st_dev`, the mount source is used instead.

@@ -436,3 +436,11 @@ Where the plan and the code disagreed, the implementation took the safest equiva
   - Delivery goes to the deliverable per-service webhook, otherwise to the validated notification targets. The node is reported as `external`.
 - **`MonitorResult`:** adds `notDeployed`, plus per-node `supported` and `error` fields.
 - **Verification gaps:** WSL was unavailable during implementation, so verification ran on Windows. Tests that are Linux-only, such as `syscall.Stat_t` in takod's `service_files_test.go`, were type-checked with `GOOS=linux go vet`. `openspec validate --strict` ran with the Windows CLI. The live-server check (task 6.3) was not run.
+- **Review follow-ups (ops integration):**
+  - *Global services.* The expected local replica count of a global service is 1 when it has no placement assignments, otherwise the number of this node's assignments.
+  - *Docker timeouts.* Container checks and the container sampler bound every Docker call to 20s. A timed-out or failed container check holds the subject with reason `docker_unavailable` instead of reporting the service down.
+  - *`tako monitor` exit 6* also covers subjects that are stale or held with `docker_unavailable`, because their health is unknown.
+  - *Certificate expiry* is reported by one node per scope: the lowest-named http checker node. Other proxy nodes retire their certificate subjects, so a domain routed on every proxy node alerts once.
+  - *Lock order.* The alert-source manager takes the shared mutation lock before its own mutex. Flushes try the lock with a 500ms bound outside the mutex, so a held snapshot lock never blocks reporters.
+  - *Shared targets.* When a scope that owns the ledger entry for a node-scoped subject is removed or retires that subject while another scope still alerts on it, ownership moves to that scope. The other scope sends its suppressed opening to the endpoint, and the retiring scope sends no retired recovery (no false all-clear).
+  - *Deploy and alert push.* After a successful rollout, a failed alert config push is a deploy summary warning, never a deploy failure. On an up-to-date deploy, a push failure for an explicit `alerts`/`monitoring` config still fails the command; one for the default-only policy is a warning.
