@@ -79,7 +79,7 @@ func (h *HooksConfig) HooksDir() string {
 	if h == nil || strings.TrimSpace(h.Path) == "" {
 		return DefaultHooksPath
 	}
-	return path.Clean(filepath.ToSlash(strings.TrimSpace(h.Path)))
+	return path.Clean(slashPath(strings.TrimSpace(h.Path)))
 }
 
 // TimeoutDuration returns the per-hook timeout, or the default when unset
@@ -167,7 +167,7 @@ func validateHooksPath(raw string) error {
 	if trimmed == "" {
 		return nil
 	}
-	slashed := filepath.ToSlash(trimmed)
+	slashed := slashPath(trimmed)
 	if filepath.IsAbs(trimmed) || strings.HasPrefix(slashed, "/") || filepath.VolumeName(trimmed) != "" || windowsDrivePattern.MatchString(slashed) {
 		return fmt.Errorf("hooks.path: %q must be relative to the directory that contains the config file", raw)
 	}
@@ -210,4 +210,10 @@ func validateRawHookCommands(data []byte, isJSON bool) error {
 		}
 	}
 	return nil
+}
+
+// slashPath normalizes both separators so a hooks.path written on Windows
+// (hooks\local) means the same directory on every platform.
+func slashPath(value string) string {
+	return strings.ReplaceAll(value, `\`, "/")
 }
