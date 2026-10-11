@@ -40,8 +40,8 @@
 
 ## 7. Targeted doc text fixes
 
-- [ ] 7.1 README.md:280-282: say that commands with the machine contract support `--output json` and `--events ndjson`, and link the human-only list in docs/MACHINE-INTERFACE.md. At README.md:249 and :393, replace "parallel deployment" with "concurrent per-node rollout in dependency order". Verify by reading the diff and by `rg -n "every command supports" README.md` returning nothing.
-- [ ] 7.2 docs/RESOURCE-MONITORING.md:169-201: replace the `file_sd_configs` sample with a node_exporter textfile-collector recipe (write to a temp file, then `mv` to `/var/lib/node_exporter/textfile/tako.prom`; run node_exporter with `--collector.textfile.directory`; scrape node_exporter). Remove the `nc -l` loop or replace it with a note that a real HTTP server is required. Mark the Prometheus YAML block `<!-- tako:snippet skip: prometheus config -->`. Verify with `rg -n file_sd_configs docs/` returning nothing.
+- [x] 7.1 README.md:280-282: say that commands with the machine contract support `--output json` and `--events ndjson`, and link the human-only list in docs/MACHINE-INTERFACE.md. At README.md:249 and :393, replace "parallel deployment" with "concurrent per-node rollout in dependency order". Verify by reading the diff and by `rg -n "every command supports" README.md` returning nothing.
+- [x] 7.2 docs/RESOURCE-MONITORING.md:169-201: replace the `file_sd_configs` sample with a node_exporter textfile-collector recipe (write to a temp file, then `mv` to `/var/lib/node_exporter/textfile/tako.prom`; run node_exporter with `--collector.textfile.directory`; scrape node_exporter). Remove the `nc -l` loop or replace it with a note that a real HTTP server is required. Mark the Prometheus YAML block `<!-- tako:snippet skip: prometheus config -->`. Verify with `rg -n file_sd_configs docs/` returning nothing.
 
 ## 8. Integration check
 

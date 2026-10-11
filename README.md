@@ -247,7 +247,7 @@ keys. See
 
 **Deployment & operations** — reconciled deploys (recreate, rolling,
 blue-green with manual or automatic promotion), graceful container
-replacement, parallel deployment, instant rollback, Git-based versioning,
+replacement, concurrent per-node rollout in dependency order, instant rollback, Git-based versioning,
 replicated deployment state with remote operation leases, release hooks
 (`release:` commands gate traffic), scheduled jobs (`kind: job` with cron, run
 history, and manual trigger), remote exec in service containers, health checks,
@@ -277,10 +277,12 @@ publishing.
 **Security & automation** — SSH host-key verification (`tofu`, `strict`,
 `ask`), secrets with automatic redaction and AWS SSM / Secrets Manager import,
 encrypted env bundles, private registry auth via a `registries:` block with
-`${ENV_VAR}` credentials, every command supports `--output json` (versioned
-result documents) and `--events ndjson` (typed progress events) with stable
-exit codes ([machine interface](./docs/MACHINE-INTERFACE.md)); single static
-binary for Linux/macOS/Windows.
+`${ENV_VAR}` credentials, commands with the machine contract support
+`--output json` (versioned result documents) and `--events ndjson` (typed
+progress events) with stable exit codes, while a small human-only set
+(such as `init` and `monitor`) rejects them
+([machine interface and command coverage](./docs/MACHINE-INTERFACE.md#command-coverage));
+single static binary for Linux/macOS/Windows.
 
 ---
 
@@ -390,7 +392,7 @@ The [Configuration guide](./docs/CONFIGURATION.md) covers the full recipe set:
 multi-server placement, background workers, stateful services and volumes,
 secrets, domain redirects and readiness checks, DNS-01 and dynamic customer
 domains, internal proxy routes, shared nodes and cross-project exports,
-parallel deployment, build strategies, resource limits, volume backups, and
+concurrent per-node rollout in dependency order, build strategies, resource limits, volume backups, and
 build cache pruning.
 
 ---
