@@ -584,8 +584,15 @@ func TestHealPauseResumeResetAPI(t *testing.T) {
 	if status := f.manager.Status("demo", "production", 10); status.Services[0].State != selfheal.StatePaused || len(status.Journal) == 0 {
 		t.Fatalf("paused status = %+v", status)
 	}
-	if _, err := f.manager.Change(HealChangeRequest{Project: "demo", Environment: "production", Action: HealActionPause, Until: timePointer(f.now.Add(8 * 24 * time.Hour))}); err == nil {
+	if _, err := f.manager.Change(HealChangeRequest{Project: "demo", Environment: "production", Action: HealActionPause, ForSeconds: 8 * 24 * 3600}); err == nil {
 		t.Fatal("pause beyond 7 days accepted")
+	}
+	// The node computes the end time from the duration on its own clock.
+	if response, err := f.manager.Change(HealChangeRequest{Project: "demo", Environment: "production", Action: HealActionPause, ForSeconds: 4 * 3600}); err != nil || response.PausedUntil == nil || !response.PausedUntil.Equal(f.now.Add(4*time.Hour)) {
+		t.Fatalf("pause for 4h = %+v %v", response, err)
+	}
+	if _, err := f.manager.Change(HealChangeRequest{Project: "demo", Environment: "production", Action: HealActionPause, ForSeconds: 60, Indefinite: true}); err == nil {
+		t.Fatal("pause with a duration and indefinite accepted")
 	}
 	if response, err := f.manager.Change(HealChangeRequest{Project: "demo", Environment: "production", Action: HealActionResume}); err != nil || !response.Changed {
 		t.Fatalf("resume = %+v %v", response, err)

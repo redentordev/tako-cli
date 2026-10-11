@@ -762,7 +762,8 @@ never delivered.
 
 Nodes advertising `node.self-healing-v1` serve `GET /v1/heal?project=&environment=&journal=N`
 and `PUT /v1/heal` (`project`, `environment`, `action` `pause|resume|reset`,
-optional `service`, `until`, `indefinite`). See [Self-Healing](SELF-HEALING.md).
+optional `service`, `forSeconds` (pause duration; the node computes the end
+time on its own clock), `indefinite`). See [Self-Healing](SELF-HEALING.md).
 
 `tako heal status --output json` reads every environment node (or
 `--server`) in parallel and returns a `HealStatus` document: `project`,

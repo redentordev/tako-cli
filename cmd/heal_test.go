@@ -139,9 +139,9 @@ func TestHealStatusDocumentGolden(t *testing.T) {
 
 func TestHealChangeDocumentGolden(t *testing.T) {
 	until := time.Date(2026, 3, 1, 13, 0, 0, 0, time.UTC)
-	request := engine.HealChangeRequest{Action: "pause", Service: "web", Until: &until}
+	request := engine.HealChangeRequest{Action: "pause", Service: "web", For: time.Hour}
 	result, err := engine.ApplyHealChange(context.Background(), "shop", "production", []string{"app-2", "app-1"}, request, nil, func(_ context.Context, server string, change takod.HealChangeRequest) (*takod.HealChangeResponse, error) {
-		if change.Project != "shop" || change.Environment != "production" || change.Action != "pause" || change.Service != "web" || change.Until == nil {
+		if change.Project != "shop" || change.Environment != "production" || change.Action != "pause" || change.Service != "web" || change.ForSeconds != 3600 {
 			t.Fatalf("change = %+v", change)
 		}
 		return &takod.HealChangeResponse{Node: server, Action: "pause", Service: "web", Changed: true, PausedUntil: &until}, nil
@@ -206,31 +206,51 @@ func TestHealChangePartialFailureNeedsAttention(t *testing.T) {
 
 func TestHealPauseFlagValidation(t *testing.T) {
 	defer func() { healFor, healUntilResume, healService = selfheal.DefaultPause, false, "" }()
-	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-
 	healFor, healUntilResume = selfheal.DefaultPause, false
-	request, err := healChangeRequest("pause", false, now)
-	if err != nil || request.Until == nil || !request.Until.Equal(now.Add(time.Hour)) || request.Indefinite {
+	request, err := healChangeRequest("pause", false)
+	if err != nil || request.For != time.Hour || request.Indefinite {
 		t.Fatalf("default pause = %+v %v", request, err)
 	}
 	healUntilResume = true
-	if request, err := healChangeRequest("pause", false, now); err != nil || !request.Indefinite || request.Until != nil {
+	if request, err := healChangeRequest("pause", false); err != nil || !request.Indefinite || request.For != 0 {
 		t.Fatalf("until-resume = %+v %v", request, err)
 	}
-	if _, err := healChangeRequest("pause", true, now); exitCodeForError(err) != 2 {
+	if _, err := healChangeRequest("pause", true); exitCodeForError(err) != 2 {
 		t.Fatalf("--for with --until-resume = %v", err)
 	}
 	healUntilResume = false
 	healFor = 8 * 24 * time.Hour
-	if _, err := healChangeRequest("pause", true, now); exitCodeForError(err) != 2 {
+	if _, err := healChangeRequest("pause", true); exitCodeForError(err) != 2 {
 		t.Fatalf("--for 8d = %v", err)
 	}
 	healFor = 0
-	if _, err := healChangeRequest("pause", true, now); exitCodeForError(err) != 2 {
+	if _, err := healChangeRequest("pause", true); exitCodeForError(err) != 2 {
 		t.Fatalf("--for 0 = %v", err)
 	}
-	if request, err := healChangeRequest("reset", false, now); err != nil || request.Until != nil {
+	if request, err := healChangeRequest("reset", false); err != nil || request.For != 0 {
 		t.Fatalf("reset = %+v %v", request, err)
+	}
+}
+
+// TestHealPauseSendsDurationNotEndTime: the wire request carries the
+// duration, so a CLI with a skewed clock cannot shift or break the pause.
+func TestHealPauseSendsDurationNotEndTime(t *testing.T) {
+	defer func() { healFor, healUntilResume = selfheal.DefaultPause, false }()
+	healFor, healUntilResume = 4*time.Hour+500*time.Millisecond, false
+	request, err := healChangeRequest("pause", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent takod.HealChangeRequest
+	if _, err := engine.ApplyHealChange(context.Background(), "shop", "production", []string{"a"}, request, nil, func(_ context.Context, _ string, change takod.HealChangeRequest) (*takod.HealChangeResponse, error) {
+		sent = change
+		return &takod.HealChangeResponse{Changed: true}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(sent)
+	if sent.ForSeconds != 4*3600 || strings.Contains(string(payload), "until") {
+		t.Fatalf("wire request = %s, want forSeconds and no end time", payload)
 	}
 }
 

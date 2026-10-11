@@ -68,10 +68,11 @@ type HealChangeRequest struct {
 	// Service limits the change to one service; empty means the whole
 	// environment.
 	Service string `json:"service,omitempty"`
-	// Until ends a pause; nil pauses for selfheal.DefaultPause unless
-	// Indefinite is set (until resumed).
-	Until      *time.Time `json:"until,omitempty"`
-	Indefinite bool       `json:"indefinite,omitempty"`
+	// ForSeconds is the pause duration; the node computes the end time on
+	// its own clock. 0 pauses for selfheal.DefaultPause unless Indefinite
+	// is set (until resumed).
+	ForSeconds int64 `json:"forSeconds,omitempty"`
+	Indefinite bool  `json:"indefinite,omitempty"`
 }
 
 // HealChangeResponse is the PUT /v1/heal result on one node.
@@ -227,19 +228,17 @@ func validateHealChangeRequest(request HealChangeRequest, now time.Time) error {
 	}
 	switch request.Action {
 	case HealActionPause:
-		if request.Indefinite && request.Until != nil {
-			return fmt.Errorf("a pause is either indefinite or has an end time")
+		if request.Indefinite && request.ForSeconds != 0 {
+			return fmt.Errorf("a pause is either indefinite or has a duration")
 		}
-		if request.Until != nil {
-			if !request.Until.After(now) {
-				return fmt.Errorf("pause end time must be in the future")
-			}
-			if request.Until.Sub(now) > selfheal.MaxPause {
-				return fmt.Errorf("pause may last at most %s", selfheal.MaxPause)
-			}
+		if request.ForSeconds < 0 {
+			return fmt.Errorf("pause duration must be positive")
+		}
+		if time.Duration(request.ForSeconds) > selfheal.MaxPause/time.Second {
+			return fmt.Errorf("pause may last at most %s", selfheal.MaxPause)
 		}
 	case HealActionResume, HealActionReset:
-		if request.Until != nil || request.Indefinite {
+		if request.ForSeconds != 0 || request.Indefinite {
 			return fmt.Errorf("%s takes no pause duration", request.Action)
 		}
 	default:
@@ -275,9 +274,13 @@ func (h *healManager) Change(request HealChangeRequest) (*HealChangeResponse, er
 	}
 	switch request.Action {
 	case HealActionPause:
-		until := request.Until
-		if until == nil && !request.Indefinite {
-			value := now.Add(selfheal.DefaultPause)
+		var until *time.Time
+		if !request.Indefinite {
+			duration := selfheal.DefaultPause
+			if request.ForSeconds > 0 {
+				duration = time.Duration(request.ForSeconds) * time.Second
+			}
+			value := now.Add(duration)
 			until = &value
 		}
 		control.AddPause(request.Service, until, now)

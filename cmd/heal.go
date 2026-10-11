@@ -142,8 +142,10 @@ func runHealStatus(cmd *cobra.Command, args []string) error {
 	return statusErr
 }
 
-// healChangeRequest validates the pause flags (exit 2 on misuse).
-func healChangeRequest(action string, forSet bool, now time.Time) (engine.HealChangeRequest, error) {
+// healChangeRequest validates the pause flags (exit 2 on misuse). A pause
+// carries its duration; each node computes the end time on its own clock,
+// so CLI clock skew cannot shorten, lengthen or reject it.
+func healChangeRequest(action string, forSet bool) (engine.HealChangeRequest, error) {
 	request := engine.HealChangeRequest{Action: action, Service: healService}
 	if action != "pause" {
 		return request, nil
@@ -155,17 +157,16 @@ func healChangeRequest(action string, forSet bool, now time.Time) (engine.HealCh
 		request.Indefinite = true
 		return request, nil
 	}
-	if healFor <= 0 || healFor > selfheal.MaxPause {
+	if healFor < time.Second || healFor > selfheal.MaxPause {
 		return request, &engine.InvalidRequestError{Err: fmt.Errorf("--for must be between 1s and %s", selfheal.MaxPause)}
 	}
-	until := now.Add(healFor).UTC().Truncate(time.Second)
-	request.Until = &until
+	request.For = healFor.Truncate(time.Second)
 	return request, nil
 }
 
 func runHealChange(cmd *cobra.Command, action string) error {
 	forSet := cmd.Flags().Lookup("for") != nil && cmd.Flags().Changed("for")
-	request, err := healChangeRequest(action, forSet, time.Now())
+	request, err := healChangeRequest(action, forSet)
 	if err != nil {
 		return err
 	}

@@ -251,9 +251,11 @@ func ClassifyHealStatus(result HealStatusResult, reads []HealNodeRead) (HealStat
 
 // HealChangeRequest is one pause, resume or reset across nodes.
 type HealChangeRequest struct {
-	Action     string
-	Service    string
-	Until      *time.Time
+	Action  string
+	Service string
+	// For is the pause duration (0: the node default). Each node computes
+	// the end time on its own clock.
+	For        time.Duration
 	Indefinite bool
 	// Operation is the lease operation (e.g. heal-pause).
 	Operation string
@@ -331,10 +333,6 @@ func newHealChangeResult(project, envName string, request HealChangeRequest) Hea
 		APIVersion: takoapi.APIVersionCurrent, Kind: KindHealChangeResult, Project: project, Environment: envName,
 		Action: request.Action, Service: request.Service, Nodes: []HealChangeNode{},
 	}
-	if request.Until != nil {
-		until := request.Until.UTC()
-		result.PausedUntil = &until
-	}
 	result.Indefinite = request.Indefinite
 	return result
 }
@@ -348,7 +346,7 @@ func ApplyHealChange(ctx context.Context, project, envName string, servers []str
 	sort.Strings(servers)
 	change := takod.HealChangeRequest{
 		Project: project, Environment: envName, Action: request.Action, Service: request.Service,
-		Until: request.Until, Indefinite: request.Indefinite,
+		ForSeconds: int64(request.For / time.Second), Indefinite: request.Indefinite,
 	}
 	if check != nil {
 		for _, server := range servers {
