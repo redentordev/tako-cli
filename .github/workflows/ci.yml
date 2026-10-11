@@ -17,7 +17,7 @@ concurrency:
 jobs:
   quality:
     name: Test, Build, Vet
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -36,7 +36,7 @@ jobs:
 
   acme-dns:
     name: Pebble DNS-01 Integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -52,7 +52,7 @@ jobs:
 
   race:
     name: Race Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
