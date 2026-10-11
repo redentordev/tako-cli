@@ -75,6 +75,12 @@ func TestMetricsHistoryTornLastLineIsSkipped(t *testing.T) {
 	if len(records) != 5 {
 		t.Fatalf("records = %d, want the 5 complete samples", len(records))
 	}
+	// The next append after the torn line still lands as its own record.
+	appendMinutes(t, store, historyBase.Add(5*time.Minute), 2, 1300)
+	records = store.readRange(historyBase, historyBase.Add(time.Hour))
+	if len(records) != 7 || records[6].T != historyBase.Add(6*time.Minute).Unix() {
+		t.Fatalf("records after torn line = %d, want 7", len(records))
+	}
 }
 
 func TestMetricsHistoryRetentionPruning(t *testing.T) {

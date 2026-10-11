@@ -166,9 +166,17 @@ func (s *metricsHistoryStore) Append(sample hostmetrics.Sample, now time.Time) e
 		s.lastHour = hour
 		s.pruneLocked(now)
 	}
-	file, err := os.OpenFile(filepath.Join(s.dir, metricsHistorySegmentName(time.Unix(record.T, 0))), os.O_WRONLY|os.O_APPEND|os.O_CREATE, metricsHistoryFileMode)
+	file, err := os.OpenFile(filepath.Join(s.dir, metricsHistorySegmentName(time.Unix(record.T, 0))), os.O_RDWR|os.O_APPEND|os.O_CREATE, metricsHistoryFileMode)
 	if err != nil {
 		return err
+	}
+	// A crash mid-write leaves a torn last line; start on a fresh line so
+	// the torn fragment does not swallow this record.
+	if info, statErr := file.Stat(); statErr == nil && info.Size() > 0 {
+		last := make([]byte, 1)
+		if _, readErr := file.ReadAt(last, info.Size()-1); readErr == nil && last[0] != '\n' {
+			line = append([]byte{'\n'}, line...)
+		}
 	}
 	_, writeErr := file.Write(line)
 	closeErr := file.Close()
