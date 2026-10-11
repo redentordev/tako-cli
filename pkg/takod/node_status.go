@@ -346,9 +346,16 @@ func (m *nodeStatusManager) RunDocker(ctx context.Context) {
 }
 
 // UpdateCollector evaluates the metrics-collector condition. It is absent
-// when native collection is disabled.
+// when native collection is disabled: a condition persisted while it was
+// enabled is dropped, so it never stays failing forever.
 func (m *nodeStatusManager) UpdateCollector() {
 	if m.collector == nil || m.interval <= 0 {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if _, ok := m.doc.Conditions[NodeConditionMetricsCollector]; ok {
+			delete(m.doc.Conditions, NodeConditionMetricsCollector)
+			m.persistLocked()
+		}
 		return
 	}
 	latest, hasSample, readErr, historyErr, warnings := m.collector()
@@ -461,8 +468,12 @@ func (m *nodeStatusManager) RunDue(ctx context.Context) {
 
 // Run evaluates conditions on their schedules until ctx is done.
 func (m *nodeStatusManager) Run(ctx context.Context) {
-	m.startedAt = m.now()
-	m.schedule(m.startedAt)
+	startedAt := m.now()
+	// Status (HTTP handlers) reads startedAt under mu.
+	m.mu.Lock()
+	m.startedAt = startedAt
+	m.mu.Unlock()
+	m.schedule(startedAt)
 	ticker := time.NewTicker(nodeStatusLoopInterval)
 	defer ticker.Stop()
 	for {

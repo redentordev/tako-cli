@@ -372,6 +372,42 @@ func TestMetricsCollectorConditionStalls(t *testing.T) {
 	if _, ok := disabled.doc.Conditions[NodeConditionMetricsCollector]; ok {
 		t.Fatal("metrics-collector must be absent with native collection disabled")
 	}
+	// Restarted with --metrics-interval 0: the persisted failing condition
+	// is dropped, not kept failing forever.
+	manager.mu.Lock()
+	manager.persistLocked()
+	manager.mu.Unlock()
+	restarted := newNodeStatusManager(strings.TrimSuffix(manager.path, nodeStatusFileName), nil, nil, nil, 0)
+	restarted.Load()
+	if _, ok := restarted.doc.Conditions[NodeConditionMetricsCollector]; !ok {
+		t.Fatal("persisted condition not loaded")
+	}
+	restarted.UpdateCollector()
+	if _, ok := restarted.doc.Conditions[NodeConditionMetricsCollector]; ok {
+		t.Fatal("stale metrics-collector condition kept with native collection disabled")
+	}
+	if data, err := os.ReadFile(restarted.path); err != nil || strings.Contains(string(data), NodeConditionMetricsCollector) {
+		t.Fatalf("persisted after disable = %s err = %v", data, err)
+	}
+}
+
+func TestNodeStatusRunStartIsRaceFree(t *testing.T) {
+	manager := newNodeStatusManager(t.TempDir(), nil, nil, func() (time.Time, bool, error, error, []string) {
+		return time.Time{}, false, nil, nil, nil
+	}, time.Minute)
+	manager.docker = func(context.Context) error { return nil }
+	manager.probe = aptHost(aptNothingToDo).probe(statusNow)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.Run(ctx)
+	}()
+	for index := 0; index < 50; index++ {
+		manager.Status()
+	}
+	cancel()
+	<-done
 }
 
 func TestRunDueSchedulesProbes(t *testing.T) {
