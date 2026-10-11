@@ -114,6 +114,64 @@ func TestResolveAddresses(t *testing.T) {
 	}
 }
 
+// Upgrade from v0.14.x positional numbering: preview:[a,s] and
+// production:[b,s] both numbered their first node .1 and the shared s .2.
+// s carries preview's a at .1, so production's b must not keep .1, or s's
+// peer union would reject production forever (address .1 held by two keys).
+func TestResolveAddressesReassignsRecordHeldByForeignPeerOnSharedMember(t *testing.T) {
+	sharedPeers := []RecordedPeer{
+		{Name: "a", Address: "10.210.0.1/24", PublicKey: "key-a"},
+		{Name: "s", Address: "10.210.0.2/24", PublicKey: "key-s"},
+	}
+	records := map[string]MemberRecord{
+		"b": {Recorded: "10.210.0.1/24", PublicKey: "key-b", PeerAddresses: []RecordedPeer{{Name: "s", Address: "10.210.0.2/24", PublicKey: "key-s"}}},
+		"s": {Recorded: "10.210.0.2/24", PublicKey: "key-s", PeerAddresses: sharedPeers},
+	}
+	got, err := ResolveAddresses("10.210.0.0/16", 24, []string{"s", "b"}, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"b": "10.210.0.3/24", "s": "10.210.0.2/24"}
+	if !reflect.DeepEqual(got.Addresses, want) {
+		t.Fatalf("addresses = %v, want %v", got.Addresses, want)
+	}
+	if !reflect.DeepEqual(got.Changed, []string{"b"}) {
+		t.Fatalf("changed = %v, want [b]", got.Changed)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "10.210.0.1 recorded by b is used by peer a") {
+		t.Fatalf("warnings = %v", got.Warnings)
+	}
+
+	// The other environment keeps its record: a's .1 is not foreign to it
+	// (its own peer set lists a under a's key), and b's new .3 is avoided.
+	sharedPeers = append(sharedPeers, RecordedPeer{Name: "b", Address: "10.210.0.3/24", PublicKey: "key-b"})
+	preview, err := ResolveAddresses("10.210.0.0/16", 24, []string{"a", "s"}, map[string]MemberRecord{
+		"a": {Recorded: "10.210.0.1/24", PublicKey: "key-a"},
+		"s": {Recorded: "10.210.0.2/24", PublicKey: "key-s", PeerAddresses: sharedPeers},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(preview.Addresses, map[string]string{"a": "10.210.0.1/24", "s": "10.210.0.2/24"}) || len(preview.Changed) != 0 {
+		t.Fatalf("preview = %+v", preview)
+	}
+}
+
+// A member's own stale entry (same name, rotated key) does not cost it its
+// recorded address.
+func TestResolveAddressesKeepsRecordAgainstOwnStaleEntry(t *testing.T) {
+	got, err := ResolveAddresses("10.210.0.0/16", 24, []string{"a", "b"}, map[string]MemberRecord{
+		"a": {Recorded: "10.210.0.1/24", PublicKey: "key-a-new"},
+		"b": {Recorded: "10.210.0.2/24", PublicKey: "key-b", PeerAddresses: []RecordedPeer{{Name: "a", Address: "10.210.0.1/24", PublicKey: "key-a-old"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Changed) != 0 || len(got.Warnings) != 0 {
+		t.Fatalf("resolution = %+v", got)
+	}
+}
+
 // Pruned or out-of-environment servers are not members, so they cannot shift
 // anyone's address: resolution over the same members and records is
 // identical however the config was loaded.

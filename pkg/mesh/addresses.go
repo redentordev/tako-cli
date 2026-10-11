@@ -62,8 +62,10 @@ func (r Resolution) IP(member string) (string, bool) {
 //  1. Members are processed in sorted name order; an enrolled member uses its
 //     platform address.
 //  2. A member keeps its recorded address when it parses, lies inside
-//     networkCIDR, and no earlier member took it. A later duplicate loses it
-//     and one warning names both members.
+//     networkCIDR, no earlier member took it, and no member's recorded peers
+//     list it under a public key outside the membership (another
+//     environment's peer on a shared member). A member that loses its record
+//     gets one warning.
 //  3. Every other member gets the lowest host address of networkCIDR that is
 //     not kept by a member and not listed in any member's recorded peers under
 //     a public key outside the membership.
@@ -132,7 +134,34 @@ func ResolveAddresses(networkCIDR string, subnetBits int, members []string, reco
 		}
 		assign(name, ip)
 	}
-	// Step 2: recorded addresses, first sorted member wins a duplicate.
+	// Addresses that members' interfaces carry for peers outside this
+	// membership: other environments' or projects' peers on a shared member.
+	// A peer is foreign when its key is not a member's key; a keyless entry
+	// is foreign unless it names a member.
+	isMember := make(map[string]bool, len(sorted))
+	for _, name := range sorted {
+		isMember[name] = true
+	}
+	foreign := map[uint32]string{}
+	for _, name := range sorted {
+		for _, peer := range records[name].PeerAddresses {
+			key := strings.TrimSpace(peer.PublicKey)
+			if memberKeys[key] || (key == "" && isMember[peer.Name]) {
+				continue
+			}
+			if ip, ok := parseMeshIPv4(peer.Address); ok {
+				if _, seen := foreign[ip]; !seen {
+					foreign[ip] = peer.Name
+				}
+			}
+		}
+	}
+	// Step 2: recorded addresses, first sorted member wins a duplicate. A
+	// record that a foreign peer holds on a shared member is taken too: two
+	// environments numbered positionally both recorded .1 for their first
+	// node, and keeping both would make the shared node's peer union reject
+	// one environment forever. An entry under the member's own name (its
+	// stale entry from before a key change) does not count.
 	for _, name := range sorted {
 		if _, done := assigned[name]; done {
 			continue
@@ -145,6 +174,10 @@ func ResolveAddresses(networkCIDR string, subnetBits int, members []string, reco
 			resolution.Warnings = append(resolution.Warnings, fmt.Sprintf("mesh address %s is recorded by both %s and %s; %s keeps it and %s gets a new address", ipString(ip), holder, name, holder, name))
 			continue
 		}
+		if holder, taken := foreign[ip]; taken && holder != name {
+			resolution.Warnings = append(resolution.Warnings, fmt.Sprintf("mesh address %s recorded by %s is used by peer %s of another environment on a shared server; %s gets a new address", ipString(ip), name, holder, name))
+			continue
+		}
 		assign(name, ip)
 	}
 	// Step 3: lowest free address for everyone else.
@@ -152,15 +185,8 @@ func ResolveAddresses(networkCIDR string, subnetBits int, members []string, reco
 	for ip := range owner {
 		used[ip] = true
 	}
-	for _, name := range sorted {
-		for _, peer := range records[name].PeerAddresses {
-			if memberKeys[strings.TrimSpace(peer.PublicKey)] {
-				continue
-			}
-			if ip, ok := parseMeshIPv4(peer.Address); ok {
-				used[ip] = true
-			}
-		}
+	for ip := range foreign {
+		used[ip] = true
 	}
 	next := base + 1
 	for _, name := range sorted {
