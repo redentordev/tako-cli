@@ -404,6 +404,35 @@ environments:
           email: admin@example.com
 ```
 
+### Environments on separate servers
+
+Several environments can live in one `tako.yaml` with their own servers. An
+operation on one environment leases, builds on, and contacts only that
+environment's servers, so an unreachable production host never blocks
+`tako deploy -e preview`. Builds and retained-image reuse also stay inside the
+environment: a staging build never runs on a production server.
+
+### Troubleshooting: `failed to acquire remote deploy leases: failed to connect to lease node`
+
+A deploy leases every server of the selected environment, plus any configured
+server that still runs the environment's previous assignments (for example a
+server you just removed from `environments.<env>.servers`). The error names the
+node and, for such a former member, says why it is in scope:
+
+```text
+failed to connect to lease node old-1 (node old-1 holds prior desired assignments for environment preview)
+```
+
+- If the node is a member of the environment, make it reachable and retry;
+  deploys never skip unreachable environment members.
+- If it is a former member that still runs the environment's containers,
+  make it reachable so the deploy can stop them. If the server was destroyed,
+  run `tako state forget-node old-1 --yes -e preview` to drop it from the
+  environment's replicated state.
+- If its host comes from a variable that is not exported, environment scoping
+  omits the server and the deploy exits with code 2 before taking any lease,
+  naming the server and the variable. Export the variable and retry.
+
 ## Environment Inheritance And Shared Fragments
 
 Environments that differ only in a domain, a replica count, or a server list
@@ -882,6 +911,79 @@ Do not delete a running `persistent: true` service from the configuration:
 Tako rejects that deploy so its placement is not forgotten. Keep it declared
 until a separately explicit persistent-workload removal has completed.
 
+## Private Registries
+
+`registries:` holds image registry credentials keyed by registry host. Each
+entry declares either a static `username`/`password` pair or a `provider`
+that mints a short-lived token on the deploying machine:
+
+<!-- tako:snippet partial -->
+```yaml
+registries:
+  # Static credentials: the password must be a whole ${ENV_VAR} reference.
+  registry.example.com:
+    username: deploy
+    password: ${REGISTRY_TOKEN}
+  # Amazon ECR: aws ecr get-login-password --region us-west-1
+  123456789012.dkr.ecr.us-west-1.amazonaws.com:
+    provider: ecr
+    profile: prod            # optional AWS CLI profile
+  # Google Artifact Registry / GCR: gcloud auth print-access-token
+  us-docker.pkg.dev:
+    provider: artifact-registry
+  # GitHub Container Registry: GH_TOKEN, then GITHUB_TOKEN, then gh auth token
+  ghcr.io:
+    provider: ghcr
+```
+
+| `provider` | Command | Username | Hosts | Options |
+| ---------- | ------- | -------- | ----- | ------- |
+| `ecr` | `aws ecr get-login-password --region <region> [--profile <profile>]` | `AWS` | `<account>.dkr.ecr[-fips].<region>.amazonaws.com[.cn]` | `region` (defaults to the host's region and must agree with it), `profile` |
+| `gcr` / `artifact-registry` | `gcloud auth print-access-token [--account <account>]` | `oauth2accesstoken` | `gcr.io`, `*.gcr.io`, `*-docker.pkg.dev` | `account` |
+| `ghcr` | `GH_TOKEN`, else `GITHUB_TOKEN`, else `gh auth token` | `username`, else `GITHUB_ACTOR`, else `gh api user --jq .login` | `ghcr.io` | `username` |
+
+Rules checked by `tako config validate`:
+
+- `provider` and `password` are mutually exclusive; `username` is accepted
+  with a provider only for `ghcr`; `region`/`profile` only for `ecr` and
+  `account` only for `gcr`/`artifact-registry`.
+- The provider must match the host, so `provider: ecr` on `ghcr.io` is a
+  config error.
+- For `ghcr`, `GH_TOKEN` takes precedence over `GITHUB_TOKEN`, the order `gh`
+  itself uses. In GitHub Actions the workflow `GITHUB_TOKEN` is used unless you
+  set `GH_TOKEN` (for example a token with `read:packages` on another
+  repository's package). A token from `gh auth token` may lack
+  `read:packages`; an auth failure then suggests
+  `gh auth refresh -s read:packages`.
+
+Which requests carry credentials:
+
+- Static entries ride every pull and build request, as before.
+- An image pull carries only the provider entry whose host is the image's
+  registry. Pulling `nginx:1.27` never runs `aws`, even with an ECR entry.
+- A takod image build carries **every** provider entry, because `FROM` lines
+  (possibly through build args) can name any registry. A project with an ECR
+  entry used only for pulls therefore still needs `aws` when it builds on
+  takod. Local builds (`deployment.build.strategy: local`) use your local
+  Docker login and mint nothing; `auto` mints only if it falls back to a
+  takod build.
+
+Deploy, rollback (single-service and project), scale, promote, `run` and
+placement apply mint the provider credentials they will attach before their
+first node mutation. A missing CLI or a failed login exits 1 before anything
+changes, with the install URL or a hint such as `aws sso login`,
+`gcloud auth login` or `gh auth login`. Operations that attach no provider
+credential run no provider CLI.
+
+Minted tokens stay in memory for one Tako process. They are cached per host
+and re-minted after 6 hours for ECR (tokens last 12 hours) and 45 minutes
+for gcloud (tokens last about an hour); concurrent pulls share one mint.
+Every token is registered with the output redactor before use, provider CLI
+stdout never appears in errors, and tokens shorter than 16 characters or
+longer than 4096 bytes are rejected. Nothing is written to `.tako/`,
+deployment history or takod state; on the node the token exists only in the
+ephemeral Docker config takod creates for one docker call.
+
 ## Secrets Management
 
 <!-- tako:snippet partial -->
@@ -1167,14 +1269,16 @@ environments:
             - 2001:db8::/32
 ```
 
-`trustedProxies` accepts CIDRs only. IPv4 prefixes broader than `/8` and IPv6
-prefixes broader than `/24` are rejected, including the catch-all networks
-`0.0.0.0/0` and `::/0`. Without this setting, `allowIps` continues to match the
-direct TCP peer. Networked domain checks emit a warning when access controls
-appear to sit behind an external proxy/CDN without trusted proxies configured.
-All routes sharing one proxy node that set `trustedProxies` must use the same
-CIDR set because Caddy's client-IP trust policy is server-global; conflicting
-sets are rejected rather than merged.
+`trustedProxies` accepts CIDRs and the CDN presets `cloudfront` and
+`cloudflare` (see [Behind a CDN](#behind-a-cdn)). IPv4 prefixes broader than
+`/8` and IPv6 prefixes broader than `/24` are rejected, including the catch-all
+networks `0.0.0.0/0` and `::/0`. Without this setting, `allowIps` continues to
+match the direct TCP peer. Networked domain checks emit a warning when access
+controls appear to sit behind an external proxy/CDN without trusted proxies
+configured. All routes sharing one proxy node that set `trustedProxies` must
+declare the same set (the same CIDRs and the same presets) because Caddy's
+client-IP trust policy is server-global; conflicting sets are rejected rather
+than merged.
 
 Per-service route policy can hide private endpoints, cap request bodies, and
 set security response headers without adding another proxy container:
@@ -1232,6 +1336,140 @@ as defense in depth. `responseHeaders` names and values are validated, safely qu
 deferred so they replace upstream values. HTTP hop-by-hop and
 message-framing headers such as `Connection`, `Content-Length`, and
 `Transfer-Encoding` cannot be overridden.
+
+### Behind a CDN
+
+A CDN such as CloudFront usually connects to the origin with the origin
+hostname in `Host`, because it needs that name for TLS to the origin. The app
+then sees `https://origin.example.com` as its own URL, and frameworks that
+compare `Origin` with the request URL (Astro `checkOrigin`, CSRF middleware)
+reject the site's own form posts with 403.
+
+#### CloudFront: pin the public host
+
+Set `X-Forwarded-Host` to the public hostname with `proxy.requestHeaders`. Caddy
+sends it to the upstream on every request, replacing whatever the client or
+CDN sent, so the app reconstructs its public URL without trusting any CDN
+address range:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: origin.example.com
+          cdn: generic
+          requestHeaders:
+            X-Forwarded-Host: www.example.com
+            X-Forwarded-Proto: https
+```
+
+`requestHeaders` sets literal headers on the request forwarded to the service
+(Caddy `header_up`) on public and internal routes. An explicit
+`X-Forwarded-Host` or `X-Forwarded-Proto` overrides Caddy's default for that
+service only. The rules, enforced by the CLI and again by `takod`:
+
+- At most 32 entries. Names are at most 128 characters of letters, digits, and
+  `-`, and are canonicalized (`x-forwarded-host` becomes `X-Forwarded-Host`);
+  two names that canonicalize to the same header are an error.
+- Values are 1-1024 visible ASCII characters or spaces, without surrounding
+  whitespace, control characters, `"`, or `\`. Values are literal: Caddy
+  placeholders such as `{http.request.host}` (any `{` or `}`) are rejected.
+- Hop-by-hop and framing headers (`Connection`, `Keep-Alive`,
+  `Proxy-Connection`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`,
+  `Trailer`, `Transfer-Encoding`, `Upgrade`, `Http2-Settings`,
+  `Content-Length`, `Host`) and client-identity headers (`X-Forwarded-For`,
+  `Forwarded`, `X-Real-IP`) cannot be set. The proxy manages client identity,
+  so the app and logs keep seeing the real client IP.
+
+These headers are sent on **every** request to the service, so do not use them
+to assert identity or privileges (for example `X-User: admin`) unless every
+request through this route really should carry that value. Like
+`responseHeaders`, their values are not stored in the replicated desired
+state; `tako config export` writes `REDACTED` placeholders. The setting requires
+agents advertising `proxy.request-headers-v1`; deploys fail before mutation on
+older agents.
+
+[Preview environments](PREVIEW-ENVIRONMENTS.md) inherit `requestHeaders` and
+`trustedProxies`, except a request header whose value is one of the base's
+hosts (such as the `X-Forwarded-Host: www.example.com` above): a preview drops
+it so its own host is forwarded, and `tako validate` warns about it.
+
+#### Trusting CDN ranges with presets
+
+To recover the real client IP (for `allowIps`, logs, or rate limiting), Caddy
+must trust the CDN's addresses. Instead of hard-coding a provider's changing
+range list, name a preset in `trustedProxies`, alone or next to explicit CIDRs:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: origin.example.com
+          cdn: generic
+          trustedProxies:
+            - cloudfront
+          requestHeaders:
+            X-Forwarded-Host: www.example.com
+          allowIps:
+            - 198.51.100.0/24
+```
+
+For Cloudflare, use `cdn: cloudflare` with `trustedProxies: [cloudflare]`.
+`cdn: cloudflare` alone does not trust Cloudflare's ranges; it only changes
+domain and DNS checks.
+
+| Preset | Source | Ranges used |
+| --- | --- | --- |
+| `cloudfront` | `https://ip-ranges.amazonaws.com/ip-ranges.json` | IPv4 and IPv6 prefixes whose `service` is `CLOUDFRONT_ORIGIN_FACING` |
+| `cloudflare` | `https://www.cloudflare.com/ips-v4`, `https://www.cloudflare.com/ips-v6` | every listed prefix |
+
+Presets are resolved on the machine running `tako`, never on the nodes, before
+any command that writes proxy routes (`deploy`, `rollback`, `run`, `scale`,
+placement apply) changes anything:
+
+- Fetched ranges pass the same checks as explicit CIDRs, and a preset must
+  resolve to 1-512 prefixes. Bodies over 16 MiB, empty lists, and malformed
+  documents count as failed fetches.
+- Results are cached for 24 hours in
+  `<user cache dir>/tako/trusted-proxies/<preset>.json` (for example
+  `~/.cache/tako/trusted-proxies/cloudfront.json` on Linux and
+  `~/Library/Caches/tako/trusted-proxies/` on macOS). A fresh cache is used
+  without a network call. Delete the file to force a refresh on the next deploy.
+- If a fetch fails, a cached copy up to 30 days old is used and a warning names
+  the preset and its age. With no usable cache, the command fails before
+  mutation, naming the URL. List the CIDRs explicitly if the deploying machine
+  cannot reach the range URLs. Ranges are never embedded in the binary.
+- Without a user cache directory (for example in CI without `HOME`), every
+  resolution fetches.
+- The route manifest carries the resolved CIDRs with their provenance (preset
+  name, fetch time, source fingerprint). On a proxy node shared by several
+  projects, routes still must declare the same presets and CIDRs, and each
+  preset uses the newest snapshot on the node, so a newer deploy of one
+  project refreshes the ranges for all of them. `takod` rejects a snapshot
+  whose fetch time is more than 5 minutes ahead of its clock.
+- Presets need agents advertising `proxy.trusted-proxy-presets-v1`.
+- `tako doctor` reports each configured preset's local cache age and warns
+  after 30 days.
+
+A preset trusts **every customer of that CDN**, not just your distribution:
+anyone can point their own CloudFront distribution or Cloudflare zone at your
+origin and send any `X-Forwarded-Host` and `X-Forwarded-For`. Pin
+`X-Forwarded-Host` with `requestHeaders` (config validation warns when a
+preset is used without it), and where the client IP matters, restrict who can
+reach the origin, for example with a secret origin header checked by the app or
+a firewall. Switching a shared node from explicit CIDRs to a preset must happen
+for every route on that node at once, because a preset and its CIDRs are
+different declared sets.
 
 ### Bring-your-own TLS certificates
 
@@ -1422,7 +1660,12 @@ tako domains hosts -e production --address mesh
 ```
 
 `--address auto` is the default: it uses `servers.<name>.privateHost` when set
-and falls back to the deterministic Tako mesh IP for the proxy node.
+and otherwise the proxy node's recorded Tako mesh address. Mesh addresses are
+read from each proxy node's takod over SSH (`GET /v1/status`), so `--address
+mesh` (and `auto` without `privateHost`) needs SSH access to the proxy nodes
+and fails when a node is unreachable or has never been deployed. Use
+`--address private` or `--address ssh` to print entries without contacting
+nodes.
 
 ## Shared Nodes
 
@@ -1452,6 +1695,24 @@ wiping the whole cache; takod also prunes Docker builder cache on a daily
 background interval using that same budget. Override explicit cleanup with
 `--docker-cache-keep-storage <size>`. Dangling image cleanup only runs during
 deploy cleanup or when `tako cleanup --docker-cache` is explicitly requested.
+
+Mesh on shared nodes: a shared node has one WireGuard interface, and its
+takod (capability `mesh.peer-sets-v1`) keeps one peer set per app/stage and
+configures the interface from the union of all sets. Deploying one app/stage
+never removes the peers another app/stage contributed, and `tako destroy`
+removes only the destroyed app/stage's set. Nodes of different environments
+that only share a server do not peer with each other. After removing a server
+from an environment's `servers` list, run `tako mesh prune -e <env>` to
+delete the set that environment left on it.
+
+Multi-node environments that share a server must use compatible `mesh:`
+blocks: the same `networkCIDR`, `subnetBits`, and `listenPort`, and the same
+address for the shared server. A conflicting deploy fails before anything on
+the node changes and names both app/stages. Single-node environments add no
+peers, so their `mesh:` blocks may differ. An older takod without peer sets
+still keeps one peer list that the last deploy replaces; deploys warn about
+such nodes (`server X is shared with app/stage`) and
+`tako upgrade servers --server X` upgrades them.
 
 By default every selected environment node with proxy routes reconciles the
 shared proxy for that app/stage. Built-in ACME TLS for public routes currently

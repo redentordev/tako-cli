@@ -190,6 +190,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
+	e.attachRegistryMinter(deploy)
 	priorDesired, priorAssignments, err := LoadPriorPlacementState(sourceClient, cfg, envName)
 	if err != nil {
 		return nil, err
@@ -206,6 +207,10 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
+		return nil, err
+	}
+	registryNeeds := deploy.DeployRegistryAuthNeeds(scaleRolloutServices(services, scaleTargets), services)
+	if err := preflightRegistryAuth(ctx, deploy, registryNeeds); err != nil {
 		return nil, err
 	}
 	if err := preflightAndSetupTakodRuntime(deploy, services, mutationServices); err != nil {

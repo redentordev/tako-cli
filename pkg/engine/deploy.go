@@ -20,6 +20,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -355,6 +356,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 
 	// Create deployer with pool for takod support.
 	deploy := deployer.NewDeployerWithPool(nil, cfg, session.envName, session.sshPool, req.Verbose)
+	e.attachRegistryMinter(deploy)
 	priorDesired, priorAssignments, err := LoadPriorPlacementState(stateRuntime, cfg, session.envName)
 	if err != nil {
 		return nil, err
@@ -396,33 +398,20 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 	deploy.SetEventSink(e.stream)
 	session.deployer = deploy
-	workloadMutationServerNames := DeployMutationTargets(cfg, allServices, deploy.ResolvedAssignments())
-	workloadMutationServerNames = AddPriorDesiredMutationTargets(cfg, workloadMutationServerNames, priorDesired)
-	if len(workloadMutationServerNames) == 0 {
-		workloadMutationServerNames = []string{sourceServerName}
-	}
-	environmentTarget := make(map[string]struct{}, len(serverNames))
-	for _, name := range serverNames {
-		environmentTarget[name] = struct{}{}
-	}
-	setupTargets := make([]string, 0, len(workloadMutationServerNames))
-	for _, name := range workloadMutationServerNames {
-		if _, ok := environmentTarget[name]; ok {
-			setupTargets = append(setupTargets, name)
-		}
-	}
-	if len(setupTargets) == 0 {
-		setupTargets = []string{sourceServerName}
+	setupTargets, mutationServerNames, err := resolveDeployTargets(cfg, session.envName, serverNames, connectivityServerNames, sourceServerName, allServices, deploy.ResolvedAssignments(), priorDesired)
+	if err != nil {
+		return nil, err
 	}
 	if err := deploy.SetTargetServers(setupTargets); err != nil {
 		return nil, err
 	}
-	mutationServerNames := append([]string(nil), workloadMutationServerNames...)
-	// Alert reconciliation enables schedulable owners and explicitly disables
-	// every other environment member. Include that control-plane fanout in the
-	// operation fence without widening deploy.SetTargetServers workload scope.
-	mutationServerNames = deployMutationAuthorityTargets(mutationServerNames, connectivityServerNames)
-	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, mutationServerNames, "deploy")
+	// Provider registry credentials are minted before leases, runtime setup
+	// or any other node mutation.
+	if err := preflightRegistryAuth(ctx, deploy, deployRegistryAuthNeeds(deploy, services, allServices, req.Service)); err != nil {
+		return nil, err
+	}
+	leaseReasonCtx := WithLeaseScopeReasons(ctx, PriorOwnerScopeReasons(session.envName, connectivityServerNames, priorDesired))
+	leaseSet, err := AcquireRemoteOperationLeasesContext(leaseReasonCtx, session.sshPool, cfg, session.envName, mutationServerNames, "deploy")
 	if err != nil {
 		return nil, err
 	}
@@ -605,6 +594,41 @@ func unionServerNames(groups ...[]string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// resolveDeployTargets computes the deploy's workload setup targets and its
+// lease (mutation authority) set. Without enrolled servers the lease set is
+// the environment's servers plus configured prior desired owners: edge and
+// builder candidates are environment members (D1 of
+// scope-leases-and-mesh-to-environment). A prior owner removed by
+// environment scoping fails closed before any lease.
+func resolveDeployTargets(cfg *config.Config, environment string, serverNames, connectivityServerNames []string, sourceServerName string, allServices map[string]config.ServiceConfig, assignments map[string][]scheduler.Assignment, prior *takodstate.DesiredRevision) ([]string, []string, error) {
+	workloadMutationServerNames := DeployMutationTargets(cfg, environment, allServices, assignments)
+	workloadMutationServerNames, err := AddPriorDesiredMutationTargets(cfg, environment, workloadMutationServerNames, prior)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(workloadMutationServerNames) == 0 {
+		workloadMutationServerNames = []string{sourceServerName}
+	}
+	environmentTarget := make(map[string]struct{}, len(serverNames))
+	for _, name := range serverNames {
+		environmentTarget[name] = struct{}{}
+	}
+	setupTargets := make([]string, 0, len(workloadMutationServerNames))
+	for _, name := range workloadMutationServerNames {
+		if _, ok := environmentTarget[name]; ok {
+			setupTargets = append(setupTargets, name)
+		}
+	}
+	if len(setupTargets) == 0 {
+		setupTargets = []string{sourceServerName}
+	}
+	// Alert reconciliation enables schedulable owners and explicitly disables
+	// every other environment member. Include that control-plane fanout in the
+	// operation fence without widening deploy.SetTargetServers workload scope.
+	mutationServerNames := deployMutationAuthorityTargets(workloadMutationServerNames, connectivityServerNames)
+	return setupTargets, mutationServerNames, nil
 }
 
 func deployMutationAuthorityTargets(workloadTargets, alertReconciliationTargets []string) []string {

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/alerttarget"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/proxypresets"
 	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/bcrypt"
@@ -260,9 +262,26 @@ func ValidationWarnings(cfg *Config) []ValidationWarning {
 					Message:     fmt.Sprintf("environment %s service %s uses proxy.dynamicDomains behind proxy.cdn=%s; on-demand HTTP-01 issuance can fail when the CDN does not pass ACME challenge requests through to Tako", environmentName, serviceName, proxy.CDN),
 				})
 			}
+			if presets := proxy.TrustedProxyPresets(); len(presets) > 0 && !proxyPinsForwardedHost(proxy) {
+				warnings = append(warnings, ValidationWarning{
+					Environment: environmentName,
+					Service:     serviceName,
+					Field:       "proxy.trustedProxies",
+					Message:     fmt.Sprintf("environment %s service %s trusts proxy.trustedProxies preset %s without pinning X-Forwarded-Host in proxy.requestHeaders; a preset trusts every customer of that CDN, so anyone can point their own CDN configuration at this origin and supply X-Forwarded-Host and X-Forwarded-For. Pin X-Forwarded-Host to the public hostname in proxy.requestHeaders and, where the client IP matters, restrict origin access", environmentName, serviceName, strings.Join(presets, ", ")),
+				})
+			}
 		}
 	}
 	return warnings
+}
+
+func proxyPinsForwardedHost(proxy *ProxyConfig) bool {
+	for name := range proxy.RequestHeaders {
+		if strings.EqualFold(name, "X-Forwarded-Host") {
+			return true
+		}
+	}
+	return false
 }
 
 // DeprecatedKeysRemovalRelease is the release in which deprecated no-op config
@@ -2275,8 +2294,16 @@ func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
 	trustedProxies := make(map[string]struct{}, len(proxy.TrustedProxies))
 	for _, entry := range proxy.TrustedProxies {
 		trimmed := strings.TrimSpace(entry)
+		if preset := strings.ToLower(trimmed); proxypresets.IsPreset(preset) {
+			// Preset names are resolved to CIDRs in proxy preflight.
+			trustedProxies[preset] = struct{}{}
+			continue
+		}
 		prefix, err := netip.ParsePrefix(trimmed)
 		if err != nil {
+			if isTrustedProxyPresetLike(trimmed) {
+				return fmt.Errorf("service %s: unknown proxy.trustedProxies preset %q (supported presets: %s; or use a CIDR)", serviceName, trimmed, strings.Join(proxypresets.Names(), ", "))
+			}
 			return fmt.Errorf("service %s: invalid proxy.trustedProxies CIDR %q", serviceName, trimmed)
 		}
 		prefix = prefix.Masked()
@@ -2330,11 +2357,7 @@ func validateProxyRoutePolicy(serviceName string, proxy *ProxyConfig) error {
 	if len(proxy.ResponseHeaders) > 64 {
 		return fmt.Errorf("service %s: proxy.responseHeaders supports at most 64 entries", serviceName)
 	}
-	forbidden := map[string]bool{
-		"connection": true, "content-length": true, "host": true, "http2-settings": true,
-		"keep-alive": true, "proxy-authenticate": true, "proxy-authorization": true,
-		"proxy-connection": true, "te": true, "trailer": true, "transfer-encoding": true, "upgrade": true,
-	}
+	forbidden := proxyHopByHopFramingHeaders
 	headers := make(map[string]string, len(proxy.ResponseHeaders))
 	for name, value := range proxy.ResponseHeaders {
 		if name != strings.TrimSpace(name) || value != strings.TrimSpace(value) {
@@ -2360,7 +2383,82 @@ func validateProxyRoutePolicy(serviceName string, proxy *ProxyConfig) error {
 	} else {
 		proxy.ResponseHeaders = headers
 	}
+
+	requestHeaders, err := validateProxyRequestHeaders(serviceName, proxy.RequestHeaders)
+	if err != nil {
+		return err
+	}
+	proxy.RequestHeaders = requestHeaders
 	return nil
+}
+
+// proxyHopByHopFramingHeaders lists header names (lowercase) that neither
+// responseHeaders nor requestHeaders may set. takod mirrors this list.
+var proxyHopByHopFramingHeaders = map[string]bool{
+	"connection": true, "content-length": true, "host": true, "http2-settings": true,
+	"keep-alive": true, "proxy-authenticate": true, "proxy-authorization": true,
+	"proxy-connection": true, "te": true, "trailer": true, "transfer-encoding": true, "upgrade": true,
+}
+
+// proxyClientIdentityHeaders lists request header names (lowercase) that are
+// managed by the proxy so the app and logs keep seeing the real client IP.
+var proxyClientIdentityHeaders = map[string]bool{
+	"x-forwarded-for": true, "forwarded": true, "x-real-ip": true,
+}
+
+const (
+	proxyRequestHeadersMaxEntries = 32
+	proxyRequestHeaderMaxValueLen = 1024
+)
+
+func validateProxyRequestHeaders(serviceName string, source map[string]string) (map[string]string, error) {
+	if len(source) > proxyRequestHeadersMaxEntries {
+		return nil, fmt.Errorf("service %s: proxy.requestHeaders supports at most %d entries", serviceName, proxyRequestHeadersMaxEntries)
+	}
+	headers := make(map[string]string, len(source))
+	for name, value := range source {
+		if name != strings.TrimSpace(name) || value != strings.TrimSpace(value) {
+			return nil, fmt.Errorf("service %s: proxy.requestHeaders names and values cannot have surrounding whitespace", serviceName)
+		}
+		if name == "" || len(name) > 128 || !proxyHeaderNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("service %s: invalid proxy.requestHeaders name %q", serviceName, name)
+		}
+		canonical := textproto.CanonicalMIMEHeaderKey(name)
+		lower := strings.ToLower(canonical)
+		if proxyHopByHopFramingHeaders[lower] {
+			return nil, fmt.Errorf("service %s: proxy.requestHeaders cannot set hop-by-hop or framing header %q", serviceName, canonical)
+		}
+		if proxyClientIdentityHeaders[lower] {
+			return nil, fmt.Errorf("service %s: proxy.requestHeaders cannot set client-identity header %q; client-identity headers are managed by the proxy", serviceName, canonical)
+		}
+		if strings.ContainsAny(value, "{}") {
+			return nil, fmt.Errorf("service %s: invalid proxy.requestHeaders value for %q: values must be literal (placeholders such as {http.request.host} are not supported)", serviceName, canonical)
+		}
+		if !isLiteralProxyRequestHeaderValue(value) {
+			return nil, fmt.Errorf("service %s: invalid proxy.requestHeaders value for %q: use 1-%d visible ASCII characters or spaces, without quotes, backslashes, or control characters", serviceName, canonical, proxyRequestHeaderMaxValueLen)
+		}
+		if _, exists := headers[canonical]; exists {
+			return nil, fmt.Errorf("service %s: duplicate proxy.requestHeaders name %q", serviceName, canonical)
+		}
+		headers[canonical] = value
+	}
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	return headers, nil
+}
+
+func isLiteralProxyRequestHeaderValue(value string) bool {
+	if value == "" || len(value) > proxyRequestHeaderMaxValueLen {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c < 0x20 || c > 0x7e || c == '{' || c == '}' || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateProxyPathPrefixes(serviceName, field string, values []string) ([]string, error) {
@@ -2402,10 +2500,45 @@ func proxyPathHasDotSegments(value string) bool {
 }
 
 func trustedProxyPrefixTooBroad(prefix netip.Prefix) bool {
-	if prefix.Addr().Is4() {
-		return prefix.Bits() < 8
+	return proxypresets.PrefixTooBroad(prefix)
+}
+
+// isTrustedProxyPresetLike reports whether an entry looks like a preset name
+// rather than a malformed address, for a clearer error.
+func isTrustedProxyPresetLike(value string) bool {
+	if value == "" {
+		return false
 	}
-	return prefix.Bits() < 24
+	for _, r := range value {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// SplitTrustedProxies separates validated proxy.trustedProxies entries into
+// explicit CIDRs and preset names, each in their canonical sorted order.
+func SplitTrustedProxies(entries []string) (cidrs []string, presets []string) {
+	for _, entry := range entries {
+		if proxypresets.IsPreset(entry) {
+			presets = append(presets, entry)
+			continue
+		}
+		cidrs = append(cidrs, entry)
+	}
+	sort.Strings(cidrs)
+	sort.Strings(presets)
+	return cidrs, presets
+}
+
+// TrustedProxyPresets returns the preset names a proxy trusts.
+func (p *ProxyConfig) TrustedProxyPresets() []string {
+	if p == nil {
+		return nil
+	}
+	_, presets := SplitTrustedProxies(p.TrustedProxies)
+	return presets
 }
 
 func validateInternalProxy(projectName string, envName string, serviceName string, proxy *ProxyConfig) error {

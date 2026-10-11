@@ -12,7 +12,6 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
-	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -96,7 +95,7 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 	if err != nil {
 		return nil, err
 	}
-	targets := placementApplyTargets(cfg, services, req.Plan)
+	targets := placementApplyTargets(cfg, environment, services, req.Plan)
 	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, pool, cfg, environment, targets, "placement-apply")
 	if err != nil {
 		return nil, err
@@ -119,6 +118,7 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 		imageRefs[name] = service.Image
 	}
 	deploy := deployer.NewDeployerWithPool(controllerClient, cfg, environment, pool, req.Verbose)
+	e.attachRegistryMinter(deploy)
 	deploy.SetRuntimeFactory(factory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetPriorAssignments(assignments)
@@ -135,6 +135,11 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 		}
 		movesByService[move.Service] = append(movesByService[move.Service], move)
 		movementServices[move.Service] = service
+	}
+	// Placement movement transfers the exact running image and never pulls
+	// or builds, so it attaches no provider credential and runs no CLI.
+	if err := preflightRegistryAuth(ctx, deploy, deployer.RegistryAuthNeeds{}); err != nil {
+		return nil, err
 	}
 	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
 		return nil, err
@@ -211,7 +216,7 @@ func validatePlacementApplyState(plan scheduler.MovementPlan, desired *takodstat
 	return assignments, already, nil
 }
 
-func placementApplyTargets(cfg *config.Config, services map[string]config.ServiceConfig, plan scheduler.MovementPlan) []string {
+func placementApplyTargets(cfg *config.Config, environment string, services map[string]config.ServiceConfig, plan scheduler.MovementPlan) []string {
 	seen := map[string]struct{}{}
 	for _, move := range plan.Moves {
 		seen[move.FromNode], seen[move.ToNode] = struct{}{}, struct{}{}
@@ -221,10 +226,12 @@ func placementApplyTargets(cfg *config.Config, services map[string]config.Servic
 		hasProxy = hasProxy || service.IsProxied()
 	}
 	if hasProxy {
-		for name, server := range cfg.Servers {
-			if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleEdge) {
-				seen[name] = struct{}{}
-			}
+		edges, err := config.EnvironmentEdgeCandidates(cfg, environment)
+		if err != nil {
+			edges = environmentSchedulableMembers(cfg, environment)
+		}
+		for _, name := range edges {
+			seen[name] = struct{}{}
 		}
 	}
 	if controller, enrolled, err := controllerAuthorityServer(cfg, nil); err == nil && enrolled {

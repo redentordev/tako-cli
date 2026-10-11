@@ -128,6 +128,13 @@ Events follow `pkg/takoapi/events.Event` (apiVersion
   original request is retried exactly once; a second denial returns the
   original error. With `retrying: false` (a streamed body that cannot be
   replayed) the command fails with the original error and asks to re-run.
+- Commands that write proxy routes (`deploy`, `rollback`, `run`, `scale`,
+  placement apply) resolve `proxy.trustedProxies` presets during proxy
+  preflight. Using a cached range list after a failed fetch, or failing to
+  write the local preset cache, emits a `warning` event with
+  `data.reason: "trusted-proxy-preset"`. When a preset cannot be resolved
+  from the network or a cache younger than 30 days, the command fails before
+  mutation with exit code 1 and an error naming the range URL.
 - Consumers MUST ignore unknown event types, fields, and `data` keys —
   the schema grows additively.
 - `level` is one of `debug`, `info`, `warn`, `error`. Debug events are
@@ -911,7 +918,12 @@ the nodes attempted. `tako upgrade servers` returns an
 on apply; `current`/`upgrade-needed`/`downgrade-blocked`/`setup-required`/`status-unavailable`
 on `--dry-run`). Enrolled nodes are ordered as worker canary, remaining
 workers, and controller last; a failed stage blocks later stages. Partial
-failure exits 6, total failure exits 1, and both still emit the document. `tako clone-setup`
+failure exits 6, total failure exits 1, and both still emit the document.
+On non-enrolled nodes each node is upgraded under the node maintenance lease;
+when any project or environment holds a live lease on a node, that node is
+reported `blocked` with the holders in `error`, the remaining nodes still run,
+and the command exits 3. `tako setup` takes the same lease on a node whose
+takod answers and exits 3 under the same condition. `tako clone-setup`
 returns a `CloneSetupResult` (doctor-style `checks` with pass/warn/fail
 counts covering config, .env, SSH connectivity, env bundle, state, and
 secrets); machine modes skip its interactive fix-up prompts and any failed
@@ -1022,7 +1034,7 @@ machine behavior:
 | Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `monitor` (`--watch`/`--local` human-only), `heal status\|pause\|resume\|reset`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), project `rollback` (`deploy.service.*`, including `deploy.service.skipped`), lifecycle hooks in `deploy\|rollback\|promote\|setup` (`hook.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
-| Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
+| Human-only by design | `init`, `backup recover`, `mesh prune`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
 | Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, hidden `platform node upgrade-publication-guard`, and hidden internal E2E helpers |
 
 Human-only commands reject `--output json` and `--events ndjson` with a
@@ -1168,6 +1180,12 @@ source, an apply failure, or a partial rollback exits 1; a held lock or lease
 exits 3. A `post-rollback` hook failure after a successful rollback exits 6.
 See [Rollback](#rollback).
 
+Registry provider credentials: when a `registries.<host>.provider` token
+cannot be minted (CLI not on PATH, failed login, rejected output), deploy,
+rollback, scale, promote, `run` and placement apply exit 1 before mutating
+any node. The config is valid; the remedy is installing or logging in to the
+provider CLI on the deploying machine.
+
 ## Redaction Guarantees
 
 - SSH passwords and credential-like service `env:` values are registered
@@ -1218,6 +1236,19 @@ See [Rollback](#rollback).
   before the response returns. An authentication failure surfaces as an
   `image.pull.auth_failed` event and a failed result (exit 1); the
   credential values themselves never appear in events or result documents.
+- Registry tokens minted by a `registries.<host>.provider` (`ecr`, `gcr`,
+  `artifact-registry`, `ghcr`) are registered with the redactor as
+  `registries.<host>.token` before they are used or returned to any caller,
+  so they are masked (`[REDACTED:registries.<host>.token]`) in human output,
+  NDJSON events, result documents and errors that embed docker output.
+  `tako config explain --redaction` lists each provider registry as masked
+  with reason `registry token (provider)` without minting a token.
+  A failing provider command never puts its standard output (the token) in
+  an error, event or log line; its standard error appears only after
+  redaction, truncated to 2 KiB. Tokens shorter than 16 characters or longer
+  than 4096 bytes are rejected. Minted tokens live only in memory for one
+  Tako process and are never written to `.tako/`, local or replicated state,
+  deployment history, or events.
 - `DeployResult.error`, `ScaleResult.error` and every per-service `error`
   pass through the redactor before the result document is emitted, in every
   output mode (health-failure errors can embed container log lines).
@@ -1228,7 +1259,9 @@ See [Rollback](#rollback).
 - Deployment records store env **keys** only (`<redacted>` values).
 - Generated configs (`tako config export`) redact SSH passwords, environment
   values, volume driver options and labels, proxy basic-auth verifiers, and
-  custom response-header values. Warnings identify every value that must be
+  custom response- and request-header values. Warnings
+  (`proxy_response_header_values_redacted`,
+  `proxy_request_header_values_redacted`) identify every value that must be
   restored before deploying the export.
 
 ### Redaction markers
@@ -1257,6 +1290,7 @@ Labels are config-path-like and start with a fixed kind:
 | `envFile.<NAME>` | a credential-like `envFile`/`envFiles` value |
 | `servers.<server>.password` | an SSH password |
 | `registries.<host>.password` | a registry password |
+| `registries.<host>.token` | a registry token minted by `registries.<host>.provider` |
 | `environments.<env>.proxy.acme.<NAME>` | an ACME DNS provider credential |
 | `services.<service>.backup.<field>` | a backup storage credential |
 | `builds.<build>.args.<ARG>` | a shared build arg value (deploy) |

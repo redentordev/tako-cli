@@ -120,6 +120,9 @@ type Status struct {
 	MembershipGeneration uint64                      `json:"membershipGeneration,omitempty"`
 	Node                 map[string]any              `json:"node,omitempty"`
 	Peers                map[string]any              `json:"peers,omitempty"`
+	// MeshPeerSets lists the stored per-environment peer sets once this node
+	// has rendered its mesh from them (mesh.peer-sets-v1).
+	MeshPeerSets []MeshPeerSetSummary `json:"meshPeerSets,omitempty"`
 }
 
 // CapabilityContainerArgvV1 means reconcile and job payloads preserve the
@@ -194,6 +197,14 @@ const CapabilityServiceFilesV1 = "service.files-v1"
 // CapabilityProxyTrustedProxiesV1 means proxy route manifests accept explicit
 // trusted proxy CIDRs and render Caddy's trusted client IP handling.
 const CapabilityProxyTrustedProxiesV1 = "proxy.trusted-proxies-v1"
+
+// CapabilityProxyRequestHeadersV1 means route manifests accept validated
+// literal upstream request headers and render them as Caddy header_up.
+const CapabilityProxyRequestHeadersV1 = "proxy.request-headers-v1"
+
+// CapabilityProxyTrustedProxyPresetsV1 means route manifests accept resolved
+// trusted-proxy preset snapshots and reconcile them newest-wins per preset.
+const CapabilityProxyTrustedProxyPresetsV1 = "proxy.trusted-proxy-presets-v1"
 
 // CapabilityProxyRemoteMeshRoutesV1 will be advertised only when the node can
 // validate authoritative active allocation generations and revocations. Phase
@@ -1880,9 +1891,17 @@ func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 	if !s.requireFreeDisk(w, "/etc/wireguard") {
 		return
 	}
-	response, err := ReconcileMesh(r.Context(), request)
+	// A CLI without peer sets still sends one environment's whole mesh.
+	// Fold it into that environment's set so other environments sharing
+	// this node keep their peers.
+	response, err := reconcileLegacyMeshApply(r.Context(), s.dataDir, request)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		status := http.StatusBadGateway
+		var conflict *MeshPeerSetConflictError
+		if errors.As(err, &conflict) {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 
@@ -2713,7 +2732,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityMonitoringHealthV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityPreviewLifecycleV1, CapabilityProxyCertStatusV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityMonitoringHealthV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyRequestHeadersV1, CapabilityProxyTrustedProxyPresetsV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityPreviewLifecycleV1, CapabilityProxyCertStatusV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,
@@ -2725,7 +2744,11 @@ func (s *Server) Status() Status {
 	if s.postgresVerificationQuotaSupported && s.minimumFreeDiskBytes > 0 && s.reservedMemoryBytes > 0 {
 		status.Capabilities = append(status.Capabilities, CapabilityBackupPostgresVerifyV1)
 	}
-	status.Capabilities = append(status.Capabilities, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1)
+	status.Capabilities = append(status.Capabilities, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1, CapabilityNodeMaintenanceLeaseV1)
+	if s.installation == nil {
+		// Enrolled nodes take their mesh from platform membership.
+		status.Capabilities = append(status.Capabilities, CapabilityMeshPeerSetsV1)
+	}
 	status.Capabilities = append(status.Capabilities, s.statusHistoryCapabilities()...)
 	if s.hygiene != nil {
 		status.Capabilities = append(status.Capabilities, CapabilityNodeDiskHygieneV1)
@@ -2757,6 +2780,9 @@ func (s *Server) Status() Status {
 
 	status.Node = readJSONMap(filepath.Join(s.dataDir, "node.json"))
 	status.Peers = readJSONMap(filepath.Join(s.dataDir, "mesh", "peers.json"))
+	if s.installation == nil {
+		status.MeshPeerSets = meshPeerSetSummaries(s.dataDir)
+	}
 	return status
 }
 

@@ -27,9 +27,12 @@ deploys it like any other environment. Nothing is written to `tako.yaml`.
   characters are cut and suffixed with a short hash.
 - With one preview base, Tako uses it. With several, choose one with `-e`
   (`tako deploy --preview pr-42 -e preview`).
-- Each preview has its own deployment history, lease, Docker network,
-  containers and volumes. It never blocks deploys of the base or of other
-  previews.
+- Each preview has its own deployment history, lease, mesh peer set,
+  Docker network, containers and volumes. Its leases, builders and edge
+  nodes are scoped to the base's servers. It never blocks deploys of the
+  base or of other previews, but a node maintenance lease (`tako upgrade`,
+  `tako setup`) blocks preview deploys and teardowns on that node like any
+  other environment lease.
 
 ## Setting up the template
 
@@ -131,8 +134,13 @@ Applied to the synthesized environment only; the base is unchanged:
    to `automatic`.
 4. Replicas are capped at `maxReplicas`.
 5. Proxy routes get the rendered host; `domains`, `redirectFrom`,
-   `dynamicDomains` and `cdn` are cleared. `tls`, `basicAuth`, `allowIps`
-   and the other route settings are kept.
+   `dynamicDomains` and `cdn` are cleared. `tls`, `basicAuth`, `allowIps`,
+   `trustedProxies` (CIDRs and presets such as `cloudflare`, resolved at
+   preview deploy time like any deploy) and the other route settings are
+   kept. `requestHeaders` are kept except a header whose value is one of the
+   base's hosts (for example `X-Forwarded-Host: app.example.com` behind a
+   CDN): previews drop it so the preview host is forwarded instead, and
+   `tako validate` warns about it.
 6. `preview.env` and `preview.services.<name>.env` are merged in.
 
 Preview data is never cloned from the base. Seed it with a `kind: run` step
@@ -189,7 +197,8 @@ non-production credentials for previews.
 
 `tako preview destroy NAME` removes, on every server the preview touched:
 its proxy routes, containers, Docker network, volumes, history and takod
-state, and its record last. It does not remove images (they share
+state, its mesh peer set (on nodes whose takod keeps per-environment peer
+sets), and its record last. It does not remove images (they share
 repositories with the base) or the project's `/opt/<project>` files. If a
 step fails, the record stays and rerunning the same command retries.
 Destroying a preview that does not exist reports `not_found` and exits 0.
@@ -204,7 +213,9 @@ also uses; there, preview images are reclaimed by the base's next deploy or
 look up the preview record first and exit 2 when the preview does not exist
 or when `-e` names a different base. `tako config explain --preview NAME`
 works offline and shows what the next preview deploy would produce. Every
-other command rejects `--preview` with exit 2.
+other command rejects `--preview` with exit 2, including `tako mesh prune`:
+a preview's peer set is removed by `tako preview destroy` and
+`tako preview prune`.
 
 ## Requirements
 

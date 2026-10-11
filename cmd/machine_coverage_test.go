@@ -93,6 +93,7 @@ var humanOnlyCommands = map[string]bool{
 	"tako env pull":       true,
 	"tako env push":       true,
 	"tako init":           true,
+	"tako mesh prune":     true,
 	"tako platform init":  true,
 	"tako platform controller promotion verify": true,
 	"tako platform backup create":               true,

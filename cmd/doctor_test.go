@@ -15,6 +15,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/health"
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
+	"github.com/redentordev/tako-cli/pkg/proxypresets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
@@ -37,6 +38,72 @@ func TestCheckProxyClientIPTopologyWarnsForWrongOrProxiedDNS(t *testing.T) {
 	})
 	if len(results) != 2 || results[0].status != "WARN" || results[1].status != "WARN" {
 		t.Fatalf("results = %#v, want two warnings", results)
+	}
+}
+
+func TestCheckProxyClientIPTopologySuggestsMatchingPreset(t *testing.T) {
+	var results []checkResult
+	checkProxyClientIPTopologyWith(func(result checkResult) {
+		results = append(results, result)
+	}, []engine.DomainStatusSpec{
+		{Service: "cf", Domain: "cf.example.com", CDN: config.ProxyCDNCloudflare, WarnUntrustedAccessControls: true},
+		{Service: "generic", Domain: "generic.example.com", CDN: config.ProxyCDNGeneric, WarnUntrustedAccessControls: true},
+	}, nil, func(engine.DomainStatusSpec) health.DomainStatus {
+		return health.DomainStatus{DNS: health.DomainDNSProxied}
+	})
+	if len(results) != 2 || !strings.Contains(results[0].fix, "[cloudflare]") || !strings.Contains(results[1].fix, "[cloudfront]") {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
+func writeDoctorPresetCache(t *testing.T, dir string, snapshot proxypresets.Snapshot) {
+	t.Helper()
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proxypresets.CachePath(dir, snapshot.Name), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckTrustedProxyPresetCacheReportsAge(t *testing.T) {
+	now := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
+	cfg := &config.Config{Environments: map[string]config.EnvironmentConfig{
+		"production": {Services: map[string]config.ServiceConfig{
+			"a": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "a.example.com", TrustedProxies: []string{"cloudfront"}}},
+			"b": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "b.example.com", TrustedProxies: []string{"cloudflare", "10.0.0.0/8"}}},
+		}},
+	}}
+	dir := t.TempDir()
+	writeDoctorPresetCache(t, dir, proxypresets.Snapshot{Name: "cloudfront", FetchedAt: now.Add(-3 * 24 * time.Hour), SourceFingerprint: strings.Repeat("a", 64), CIDRs: []string{"15.158.0.0/16"}})
+	writeDoctorPresetCache(t, dir, proxypresets.Snapshot{Name: "cloudflare", FetchedAt: now.Add(-31 * 24 * time.Hour), SourceFingerprint: strings.Repeat("b", 64), CIDRs: []string{"173.245.48.0/20"}})
+
+	var results []checkResult
+	checkTrustedProxyPresetCacheWith(func(result checkResult) { results = append(results, result) }, cfg, "production", dir, now)
+	if len(results) != 2 {
+		t.Fatalf("results = %#v", results)
+	}
+	if results[0].status != "WARN" || !strings.Contains(results[0].message, "cloudflare") || !strings.Contains(results[0].message, "31 days") {
+		t.Fatalf("stale cloudflare result = %#v", results[0])
+	}
+	if results[1].status != "PASS" || !strings.Contains(results[1].message, "cloudfront") || !strings.Contains(results[1].message, "3 days") {
+		t.Fatalf("fresh cloudfront result = %#v", results[1])
+	}
+
+	results = nil
+	checkTrustedProxyPresetCacheWith(func(result checkResult) { results = append(results, result) }, cfg, "production", t.TempDir(), now)
+	if len(results) != 2 || results[0].status != "WARN" || !strings.Contains(results[0].message, "no valid cached ranges") {
+		t.Fatalf("missing cache results = %#v", results)
+	}
+
+	results = nil
+	unused := &config.Config{Environments: map[string]config.EnvironmentConfig{"production": {Services: map[string]config.ServiceConfig{
+		"web": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "example.com", TrustedProxies: []string{"10.0.0.0/8"}}},
+	}}}}
+	checkTrustedProxyPresetCacheWith(func(result checkResult) { results = append(results, result) }, unused, "production", dir, now)
+	if len(results) != 1 || results[0].status != "SKIP" {
+		t.Fatalf("unused results = %#v", results)
 	}
 }
 

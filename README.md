@@ -217,7 +217,8 @@ Tako derives a config server key from the host (`203.0.113.10` becomes
 it in remote state; pass `--server-name` to choose it explicitly. `tako run`
 synthesizes Tako desired state and still uses takod, labels, leases, history,
 and proxy reconciliation. Private registry pulls work with
-`--registry-user` + `--registry-password-stdin`. When updating an existing
+`--registry-user` + `--registry-password-stdin`; config-based deploys can
+instead mint cloud registry tokens with `registries.<host>.provider`. When updating an existing
 service identity from automation, pass `--yes` to accept the update plan
 noninteractively.
 
@@ -288,7 +289,8 @@ publishing.
 **Security & automation** — SSH host-key verification (`tofu`, `strict`,
 `ask`), secrets with automatic redaction and AWS SSM / Secrets Manager import,
 encrypted env bundles, private registry auth via a `registries:` block with
-`${ENV_VAR}` credentials, commands with the machine contract support
+`${ENV_VAR}` credentials or minted ECR, Artifact Registry/GCR and GHCR tokens
+(`provider: ecr|gcr|artifact-registry|ghcr`), commands with the machine contract support
 `--output json` (versioned result documents) and `--events ndjson` (typed
 progress events) with stable exit codes, while a small human-only set
 (such as `init` and `monitor`) rejects them
@@ -440,7 +442,8 @@ state, mesh, and CI model.
 The [examples/](./examples) directory has ready-to-deploy projects: web
 frameworks (Node.js, Next.js, Hono, SvelteKit, SolidStart, Astro, PHP,
 Laravel, Rails), full-stack and monorepo setups, background workers, scaling
-and placement, scheduled jobs, private registries, and third-party apps
+and placement, scheduled jobs, private registries (static or provider-minted
+credentials), and third-party apps
 (n8n, Plausible, Umami, Ghost, Sentry).
 
 ---

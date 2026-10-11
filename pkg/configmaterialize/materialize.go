@@ -383,6 +383,20 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 			Message: fmt.Sprintf("service %q proxy response-header values were redacted; restore them before deploying", name),
 		})
 	}
+	if len(service.ProxyRequestHeaderNames) > 0 {
+		if out.Proxy == nil {
+			out.Proxy = &config.ProxyConfig{}
+		}
+		out.Proxy.RequestHeaders = make(map[string]string, len(service.ProxyRequestHeaderNames))
+		for _, header := range service.ProxyRequestHeaderNames {
+			out.Proxy.RequestHeaders[header] = "REDACTED"
+		}
+		warnings = append(warnings, Warning{
+			Code:    "proxy_request_header_values_redacted",
+			Service: name,
+			Message: fmt.Sprintf("service %q proxy request-header values were redacted; restore them before deploying", name),
+		})
+	}
 
 	if strings.TrimSpace(service.DeployStrategy) != "" {
 		out.Deploy.Strategy = strings.TrimSpace(service.DeployStrategy)

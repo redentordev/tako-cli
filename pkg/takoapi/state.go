@@ -118,6 +118,7 @@ type DesiredServiceDocument struct {
 	ProxyBasicAuthConfigured bool                        `json:"proxyBasicAuthConfigured,omitempty"`
 	ProxyBasicAuthUsername   string                      `json:"proxyBasicAuthUsername,omitempty"`
 	ProxyResponseHeaderNames []string                    `json:"proxyResponseHeaderNames,omitempty"`
+	ProxyRequestHeaderNames  []string                    `json:"proxyRequestHeaderNames,omitempty"`
 	Volumes                  []string                    `json:"volumes,omitempty"`
 	Files                    []ServiceFileDocument       `json:"files,omitempty"`
 	EnvKeys                  []string                    `json:"envKeys,omitempty"`

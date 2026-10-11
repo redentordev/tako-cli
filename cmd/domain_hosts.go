@@ -1,7 +1,8 @@
 package cmd
 
 import (
-	"encoding/binary"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -11,7 +12,12 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/mesh"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
 
@@ -133,15 +139,6 @@ func internalHostAddressTargets(cfg *config.Config, envName string, proxyServers
 		return nil, fmt.Errorf("--address must be auto, private, mesh, or ssh")
 	}
 
-	envServers, err := cfg.GetEnvironmentServers(envName)
-	if err != nil {
-		return nil, err
-	}
-	meshIPs, err := meshHostIPs(cfg, envServers)
-	if err != nil {
-		return nil, err
-	}
-
 	targets := make([]internalHostAddressTarget, 0, len(proxyServers))
 	for _, serverName := range proxyServers {
 		server, ok := cfg.Servers[serverName]
@@ -150,6 +147,7 @@ func internalHostAddressTargets(cfg *config.Config, envName string, proxyServers
 		}
 		address := ""
 		source := ""
+		var err error
 		switch addressMode {
 		case "private":
 			address = server.PrivateHost
@@ -158,7 +156,10 @@ func internalHostAddressTargets(cfg *config.Config, envName string, proxyServers
 				return nil, fmt.Errorf("server %s has no privateHost configured", serverName)
 			}
 		case "mesh":
-			address = meshIPs[serverName]
+			address, err = recordedMeshHostIP(cfg, serverName)
+			if err != nil {
+				return nil, err
+			}
 			source = "mesh"
 		case "ssh":
 			address = server.Host
@@ -168,7 +169,10 @@ func internalHostAddressTargets(cfg *config.Config, envName string, proxyServers
 				address = server.PrivateHost
 				source = "privateHost"
 			} else {
-				address = meshIPs[serverName]
+				address, err = recordedMeshHostIP(cfg, serverName)
+				if err != nil {
+					return nil, err
+				}
 				source = "mesh"
 			}
 		}
@@ -180,25 +184,57 @@ func internalHostAddressTargets(cfg *config.Config, envName string, proxyServers
 	return targets, nil
 }
 
-func meshHostIPs(cfg *config.Config, envServers []string) (map[string]string, error) {
-	_, ipNet, err := net.ParseCIDR(cfg.Mesh.NetworkCIDR)
+// readDomainsHostsNodeStatus reads one proxy node's GET /v1/status document.
+// Tests replace it to avoid SSH.
+var readDomainsHostsNodeStatus = func(cfg *config.Config, serverName string) (takod.Status, error) {
+	pool := ssh.NewPool()
+	defer pool.CloseAll()
+	factory, err := nodeclient.NewFactory(cfg, pool, takodSocketFromConfig(cfg))
 	if err != nil {
-		return nil, fmt.Errorf("invalid mesh CIDR: %w", err)
+		return takod.Status{}, err
 	}
-	baseIP := ipNet.IP.To4()
-	if baseIP == nil {
-		return nil, fmt.Errorf("mesh.networkCIDR must be IPv4")
+	defer factory.CloseIdleConnections()
+	client, _, err := factory.Client(context.Background(), serverName)
+	if err != nil {
+		return takod.Status{}, err
 	}
-	base := binary.BigEndian.Uint32(baseIP)
-	ips := make(map[string]string, len(envServers))
-	for index, serverName := range envServers {
-		ip := make(net.IP, 4)
-		binary.BigEndian.PutUint32(ip, base+uint32(index+1))
-		ips[serverName] = ip.String()
+	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "GET", "/v1/status", nil)
+	if err != nil {
+		return takod.Status{}, err
 	}
-	return ips, nil
+	var status takod.Status
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		return takod.Status{}, fmt.Errorf("takod returned invalid status: %w", err)
+	}
+	return status, nil
 }
 
+// recordedMeshHostIP returns the mesh address a proxy node actually uses:
+// the enrolled platform address, or the address its takod recorded when the
+// mesh was last applied. Mesh addresses are not derivable from the config, so
+// an unreachable node or a node without a record is an error.
+func recordedMeshHostIP(cfg *config.Config, serverName string) (string, error) {
+	if platform := strings.TrimSpace(cfg.Servers[serverName].MeshIP); platform != "" {
+		return hostIPOnly(platform), nil
+	}
+	status, err := readDomainsHostsNodeStatus(cfg, serverName)
+	if err != nil {
+		return "", fmt.Errorf("could not read the recorded mesh address of server %s (use --address private or --address ssh to skip mesh lookup): %w", serverName, err)
+	}
+	recorded := mesh.RecordedNodeAddress(status.Node)
+	if recorded == "" {
+		return "", fmt.Errorf("server %s has no recorded mesh address; deploy the environment first or use --address private or --address ssh", serverName)
+	}
+	return hostIPOnly(recorded), nil
+}
+
+func hostIPOnly(address string) string {
+	address = strings.TrimSpace(address)
+	if ip, _, err := net.ParseCIDR(address); err == nil {
+		return ip.String()
+	}
+	return address
+}
 func printInternalHostEntries(out io.Writer, project string, envName string, entries []internalHostEntry) {
 	fmt.Fprintf(out, "# Tako internal hosts for %s/%s\n", project, envName)
 	fmt.Fprintln(out, "# Add these on clients that can reach the listed private or mesh addresses.")

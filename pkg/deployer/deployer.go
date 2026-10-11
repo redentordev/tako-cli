@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redentordev/tako-cli/internal/state"
@@ -20,6 +21,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/proxypresets"
 	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -90,6 +92,25 @@ type Deployer struct {
 	runtimeFactoryMu         sync.Mutex
 	assignmentMu             sync.Mutex
 	assignments              map[string][]scheduler.Assignment
+	registryMinter           RegistryMinter
+	ghCLITokenUsed           atomic.Bool
+	presetResolver           trustedProxyPresetResolver
+	presetSnapshots          map[string]proxypresets.Snapshot
+	presetMu                 sync.Mutex
+	// meshMu guards the per-operation mesh view: the GET /v1/status results
+	// captured while verifying agents and the resolved member addresses that
+	// mesh apply and proxy upstreams share.
+	meshMu        sync.Mutex
+	meshStatuses  map[string]takod.Status
+	meshAddresses map[string]string
+	// meshUnapplied lists members whose read-only resolved address differs
+	// from their record (set only when this operation did not apply the mesh).
+	meshUnapplied map[string]bool
+	// meshStatusReader overrides how member status is read (tests).
+	meshStatusReader func(serverName string) (takod.Status, error)
+	// meshClient overrides the takod client used for mesh key, metadata and
+	// mesh apply requests (tests).
+	meshClient func(serverName string) (any, error)
 }
 
 const (
@@ -610,7 +631,12 @@ func (d *Deployer) buildImageWithClient(client any, serviceName string, service 
 
 		endpoint := takodclient.ScopedImageBuildEndpoint(d.config.Project.Name, d.environment, fullImageName, service.Dockerfile)
 		body := io.Reader(archive)
-		auths := d.registryAuths()
+		// A build mints every provider entry: FROM lines can name any
+		// registry, possibly through build arguments.
+		auths, err := d.registryAuths(d.baseContext(), "")
+		if err != nil {
+			return "", err
+		}
 		if len(auths) > 0 || len(service.BuildArgs) > 0 || service.BuildTarget != "" {
 			// Credentials ride the body as a JSON preamble line ahead of
 			// the tar stream — never the URL or argv (ADR 10).

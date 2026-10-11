@@ -141,18 +141,10 @@ func readRunRegistryPassword(cmd *cobra.Command, opts *runOptions) error {
 }
 
 // runImageRegistryHost extracts the registry host from an image reference;
-// bare Docker Hub references map to docker.io.
+// bare Docker Hub references map to docker.io. It delegates to the shared
+// config.ImageRegistryHost so deploy pulls and `tako run` agree.
 func runImageRegistryHost(imageRef string) string {
-	first := imageRef
-	if idx := strings.IndexByte(imageRef, '/'); idx >= 0 {
-		first = imageRef[:idx]
-	} else {
-		return "docker.io"
-	}
-	if strings.ContainsAny(first, ".:") || first == "localhost" {
-		return first
-	}
-	return "docker.io"
+	return config.ImageRegistryHost(imageRef)
 }
 
 func synthesizeRunConfig(imageRef string, opts *runOptions) (*config.Config, config.ServiceConfig, map[string]string, error) {

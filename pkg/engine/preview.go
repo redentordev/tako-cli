@@ -628,6 +628,14 @@ func (e *Engine) teardownPreview(ctx context.Context, cfg *config.Config, runtim
 			serverRequest.PreviewUpdatedAt = &updatedAt
 		}
 		response, err := CleanupViaTakodContext(ctx, clients[server], cfg, serverRequest)
+		if err == nil {
+			// A preview is its own (project, environment) mesh identity on
+			// shared nodes: drop its peer set like `tako destroy` does, so the
+			// node re-renders the union of the remaining environments' sets.
+			if meshErr := RemoveMeshPeerSetContext(ctx, clients[server], cfg, cfg.Servers[server], identity); meshErr != nil {
+				err = meshErr
+			}
+		}
 		if err != nil {
 			row.Status = PreviewDestroyStatusFailed
 			row.Error = e.RedactSensitive(err.Error())

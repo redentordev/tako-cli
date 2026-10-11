@@ -163,6 +163,7 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	session.sourceClient = sourceClient
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, req.Environment, session.sshPool, req.Verbose)
+	e.attachRegistryMinter(deploy)
 	priorDesired, priorAssignments, err := LoadPriorPlacementState(sourceClient, cfg, req.Environment)
 	if err != nil {
 		return nil, err
@@ -187,7 +188,10 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 		return nil, err
 	}
 	runServices := map[string]config.ServiceConfig{req.ServiceName: req.Service}
-	if err := preflightAndSetupTakodRuntime(deploy, runServices, runServices); err != nil {
+	if err := preflightRegistryAuth(ctx, deploy, deploy.DeployRegistryAuthNeeds(runServices, runServices)); err != nil {
+		return nil, err
+	}
+	if err := preflightAndVerifyTakodRuntime(deploy, runServices, runServices); err != nil {
 		return nil, err
 	}
 	session.deployer = deploy

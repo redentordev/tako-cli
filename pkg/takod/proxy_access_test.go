@@ -1,8 +1,13 @@
 package takod
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // takodTestBcryptHash is bcrypt("s3cret", cost 10) — a fixed fixture, not a secret.
@@ -126,6 +131,137 @@ func TestRenderCaddyfileRejectsConflictingTrustedProxySets(t *testing.T) {
 	}
 }
 
+func presetSnapshot(name string, fetchedAt time.Time, fingerprint string, cidrs ...string) ProxyTrustedProxyPreset {
+	return ProxyTrustedProxyPreset{Name: name, FetchedAt: fetchedAt, SourceFingerprint: strings.Repeat(fingerprint, 64/len(fingerprint)), CIDRs: cidrs}
+}
+
+func TestRenderCaddyfileNewestPresetSnapshotWinsAcrossProjects(t *testing.T) {
+	old := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	fresh := old.Add(30 * 24 * time.Hour)
+	manifests := []ProxyRouteManifest{{
+		Version: 1, Project: "alpha", Environment: "production",
+		Routes: []ProxyRoute{{
+			Service: "a", Domains: []string{"a.example.com"}, Upstreams: []string{"http://a:3000"},
+			TrustedProxies:      []string{"10.0.0.0/8"},
+			TrustedProxyPresets: []ProxyTrustedProxyPreset{presetSnapshot("cloudfront", old, "a", "15.158.0.0/16")},
+			AllowIPs:            []string{"198.51.100.0/24"},
+		}},
+	}, {
+		Version: 1, Project: "beta", Environment: "production",
+		Routes: []ProxyRoute{{
+			Service: "b", Domains: []string{"b.example.com"}, Upstreams: []string{"http://b:3000"},
+			TrustedProxies:      []string{"10.0.0.0/8"},
+			TrustedProxyPresets: []ProxyTrustedProxyPreset{presetSnapshot("cloudfront", fresh, "b", "13.124.199.0/24", "15.158.0.0/16")},
+		}},
+	}}
+	caddyfile, err := renderCaddyfile(manifests)
+	if err != nil {
+		t.Fatalf("renderCaddyfile returned error: %v", err)
+	}
+	if !strings.Contains(caddyfile, "\t\ttrusted_proxies static 10.0.0.0/8 13.124.199.0/24 15.158.0.0/16\n") {
+		t.Fatalf("newest snapshot was not used:\n%s", caddyfile)
+	}
+	if !strings.Contains(caddyfile, "@tako_allowed client_ip 198.51.100.0/24") {
+		t.Fatalf("preset-only trust did not switch allowIps to client_ip:\n%s", caddyfile)
+	}
+
+	// Rendering in the other order gives the same result: A cannot regress B.
+	reversed, err := renderCaddyfile([]ProxyRouteManifest{manifests[1], manifests[0]})
+	if err != nil || reversed != caddyfile {
+		t.Fatalf("render order changed result (err %v)", err)
+	}
+
+	// Equal fetch times break ties by the greatest fingerprint.
+	manifests[0].Routes[0].TrustedProxyPresets[0].FetchedAt = fresh
+	manifests[0].Routes[0].TrustedProxyPresets[0].SourceFingerprint = strings.Repeat("f", 64)
+	tied, err := renderCaddyfile(manifests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tied, "\t\ttrusted_proxies static 10.0.0.0/8 15.158.0.0/16\n") {
+		t.Fatalf("fingerprint tie-break was not applied:\n%s", tied)
+	}
+}
+
+func TestRenderCaddyfilePresetVersusExplicitCIDRsConflict(t *testing.T) {
+	now := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	for _, routes := range [][]ProxyRoute{
+		{
+			{Service: "a", Domains: []string{"a.example.com"}, Upstreams: []string{"http://a:3000"}, TrustedProxyPresets: []ProxyTrustedProxyPreset{presetSnapshot("cloudfront", now, "a", "15.158.0.0/16")}},
+			{Service: "b", Domains: []string{"b.example.com"}, Upstreams: []string{"http://b:3000"}, TrustedProxies: []string{"15.158.0.0/16"}},
+		},
+		{
+			{Service: "a", Domains: []string{"a.example.com"}, Upstreams: []string{"http://a:3000"}, TrustedProxyPresets: []ProxyTrustedProxyPreset{presetSnapshot("cloudfront", now, "a", "15.158.0.0/16")}},
+			{Service: "b", Domains: []string{"b.example.com"}, Upstreams: []string{"http://b:3000"}, TrustedProxyPresets: []ProxyTrustedProxyPreset{presetSnapshot("cloudflare", now, "a", "173.245.48.0/20")}},
+		},
+	} {
+		_, err := renderCaddyfile([]ProxyRouteManifest{{Version: 1, Project: "demo", Environment: "production", Routes: routes}})
+		if err == nil || !strings.Contains(err.Error(), "conflicting trusted proxy CIDR sets") {
+			t.Fatalf("error = %v, want conflicting trusted proxy sets", err)
+		}
+	}
+}
+
+func TestValidateProxyRouteManifestRejectsUnsafePresetSnapshots(t *testing.T) {
+	now := time.Date(2026, 10, 12, 8, 0, 0, 0, time.UTC)
+	restore := proxyRouteNow
+	proxyRouteNow = func() time.Time { return now }
+	t.Cleanup(func() { proxyRouteNow = restore })
+	many := make([]string, 0, 513)
+	for i := 0; i < 513; i++ {
+		many = append(many, fmt.Sprintf("10.%d.%d.0/24", i/256, i%256))
+	}
+	cases := []struct {
+		name   string
+		preset ProxyTrustedProxyPreset
+		want   string
+	}{
+		{"future snapshot", presetSnapshot("cloudfront", now.Add(time.Hour), "a", "15.158.0.0/16"), "ahead of this node's clock"},
+		{"unknown preset", presetSnapshot("fastly", now, "a", "15.158.0.0/16"), "unknown trusted proxy preset"},
+		{"broad prefix", presetSnapshot("cloudfront", now, "a", "0.0.0.0/0"), "invalid trusted proxy CIDR"},
+		{"noncanonical prefix", presetSnapshot("cloudfront", now, "a", "15.158.1.0/16"), "invalid trusted proxy CIDR"},
+		{"injection", presetSnapshot("cloudfront", now, "a", "15.158.0.0/16\n}"), "invalid trusted proxy CIDR"},
+		{"empty", presetSnapshot("cloudfront", now, "a"), "between 1 and 512"},
+		{"too many", presetSnapshot("cloudfront", now, "a", many...), "between 1 and 512"},
+		{"bad fingerprint", ProxyTrustedProxyPreset{Name: "cloudfront", FetchedAt: now, SourceFingerprint: "zz", CIDRs: []string{"15.158.0.0/16"}}, "fingerprint"},
+		{"zero time", presetSnapshot("cloudfront", time.Time{}, "a", "15.158.0.0/16"), "no fetch time"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := accessControlManifest(ProxyRoute{TrustedProxyPresets: []ProxyTrustedProxyPreset{tc.preset}})[0]
+			err := validateProxyRouteManifest(&manifest)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	ok := accessControlManifest(ProxyRoute{TrustedProxyPresets: []ProxyTrustedProxyPreset{presetSnapshot("cloudfront", now.Add(4*time.Minute), "a", "15.158.0.0/16")}})[0]
+	if err := validateProxyRouteManifest(&ok); err != nil {
+		t.Fatalf("snapshot within clock skew rejected: %v", err)
+	}
+}
+
+func TestWriteProxyFileRejectsFuturePresetSnapshot(t *testing.T) {
+	useTempProxyPaths(t)
+	valid := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://demo-web:3000"]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo-production.json", Content: valid}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(proxyCaddyfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	content := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://demo-web:3000"],"trustedProxyPresets":[{"name":"cloudfront","fetchedAt":"` + future + `","sourceFingerprint":"` + strings.Repeat("a", 64) + `","cidrs":["15.158.0.0/16"]}]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo-production.json", Content: content}); err == nil || !strings.Contains(err.Error(), "ahead of this node's clock") {
+		t.Fatalf("future snapshot error = %v", err)
+	}
+	after, err := os.ReadFile(proxyCaddyfilePath)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("rejected snapshot changed the Caddyfile (%v)", err)
+	}
+}
+
 func TestRenderCaddyfileWithoutTrustedProxiesIsUnchanged(t *testing.T) {
 	got, err := renderCaddyfile(accessControlManifest(ProxyRoute{}))
 	if err != nil {
@@ -196,6 +332,19 @@ func TestValidateProxyRoutePolicyRejectsUnsafeManifest(t *testing.T) {
 		{"bad body limit", ProxyRoute{MaxRequestBody: "10MiB"}, "request body"},
 		{"header injection", ProxyRoute{ResponseHeaders: map[string]string{"X-Test": "ok\r\nInjected: yes"}}, "response header"},
 		{"framing header", ProxyRoute{ResponseHeaders: map[string]string{"Content-Length": "1"}}, "framing"},
+		{"request header newline", ProxyRoute{RequestHeaders: map[string]string{"X-Test": "ok\nrespond 200"}}, "request header value"},
+		{"request header quote", ProxyRoute{RequestHeaders: map[string]string{"X-Test": `ok" respond 200`}}, "request header value"},
+		{"request header placeholder", ProxyRoute{RequestHeaders: map[string]string{"X-Forwarded-Host": "{http.request.host}"}}, "request header value"},
+		{"request header backslash", ProxyRoute{RequestHeaders: map[string]string{"X-Test": `a\b`}}, "request header value"},
+		{"request header padded", ProxyRoute{RequestHeaders: map[string]string{"X-Test": " a"}}, "request header value"},
+		{"request header host", ProxyRoute{RequestHeaders: map[string]string{"host": "evil.example.com"}}, "hop-by-hop or framing"},
+		{"request header http2-settings", ProxyRoute{RequestHeaders: map[string]string{"Http2-Settings": "AAMAAABkAAQAAP__"}}, "hop-by-hop or framing"},
+		{"request header xff", ProxyRoute{RequestHeaders: map[string]string{"x-forwarded-for": "1.2.3.4"}}, "client-identity"},
+		{"request header x-real-ip", ProxyRoute{RequestHeaders: map[string]string{"X-Real-IP": "1.2.3.4"}}, "client-identity"},
+		{"request header forwarded", ProxyRoute{RequestHeaders: map[string]string{"Forwarded": "for=1.2.3.4"}}, "client-identity"},
+		{"request header name", ProxyRoute{RequestHeaders: map[string]string{"X Test": "a"}}, "request header name"},
+		{"request header duplicate", ProxyRoute{RequestHeaders: map[string]string{"X-Test": "a", "x-test": "b"}}, "duplicate request header"},
+		{"too many request headers", ProxyRoute{RequestHeaders: manyRequestHeaders(33)}, "too many request headers"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -205,6 +354,57 @@ func TestValidateProxyRoutePolicyRejectsUnsafeManifest(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tt.needle)
 			}
 		})
+	}
+}
+
+func manyRequestHeaders(count int) map[string]string {
+	headers := make(map[string]string, count)
+	for i := 0; i < count; i++ {
+		headers["X-Header-"+strings.Repeat("a", i+1)] = "v"
+	}
+	return headers
+}
+
+func TestValidateProxyRouteRequestHeadersCanonicalizes(t *testing.T) {
+	manifest := accessControlManifest(ProxyRoute{RequestHeaders: map[string]string{"x-forwarded-host": "www.example.com"}})[0]
+	if err := validateProxyRouteManifest(&manifest); err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.Routes[0].RequestHeaders; len(got) != 1 || got["X-Forwarded-Host"] != "www.example.com" {
+		t.Fatalf("request headers were not canonicalized: %#v", got)
+	}
+	exact := accessControlManifest(ProxyRoute{RequestHeaders: manyRequestHeaders(32)})[0]
+	if err := validateProxyRouteManifest(&exact); err != nil {
+		t.Fatalf("32 request headers rejected: %v", err)
+	}
+}
+
+func TestWriteProxyFileRejectsHandCraftedRequestHeaderInjection(t *testing.T) {
+	useTempProxyPaths(t)
+	valid := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://demo-web:3000"]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo-production.json", Content: valid}); err != nil {
+		t.Fatalf("WriteProxyFile(valid) returned error: %v", err)
+	}
+	before, err := os.ReadFile(proxyCaddyfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{`ok\nrespond 200`, `ok\" respond 200`, `{http.request.host}`} {
+		injected := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://demo-web:3000"],"requestHeaders":{"X-Forwarded-Host":"` + value + `"}}]}`
+		if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo-production.json", Content: injected}); err == nil {
+			t.Fatalf("hand-crafted request header %q was accepted", value)
+		}
+		after, err := os.ReadFile(proxyCaddyfilePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Fatalf("rejected manifest changed the Caddyfile:\n%s", after)
+		}
+		stored, err := os.ReadFile(filepath.Join(proxyRoutesDir, "demo-production.json"))
+		if err != nil || string(stored) != valid {
+			t.Fatalf("rejected manifest replaced the stored route file: %q (%v)", stored, err)
+		}
 	}
 }
 

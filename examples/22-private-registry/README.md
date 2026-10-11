@@ -31,6 +31,24 @@ tako deploy
   `registry authentication failed` error (and an `image.pull.auth_failed`
   event in `--events ndjson`), so you know to rotate the token rather
   than debug a missing image.
+- Cloud registries can mint short-lived tokens instead of a static
+  password: set `provider` and drop `username`/`password`. Tako runs the
+  provider CLI on your machine before the deploy changes anything, keeps
+  the token in memory only, and masks it in all output:
+
+```yaml
+registries:
+  123456789012.dkr.ecr.us-east-1.amazonaws.com:
+    provider: ecr                # aws ecr get-login-password --region us-east-1
+  us-docker.pkg.dev:
+    provider: artifact-registry  # gcloud auth print-access-token
+  ghcr.io:
+    provider: ghcr               # GH_TOKEN, GITHUB_TOKEN, or gh auth token
+```
+
+  No wrapper script exporting `ECR_PASSWORD` is needed. See
+  [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#private-registries)
+  for the host rules and provider options.
 - One-off deploys without a config file work too:
 
 ```bash

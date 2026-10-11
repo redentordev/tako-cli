@@ -122,9 +122,10 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 		if err := ctx.Err(); err != nil {
 			return RemoteLease{}, err
 		}
+		reason := leaseScopeReasonSuffix(ctx, serverName)
 		client, _, err := factory.Client(ctx, serverName)
 		if err != nil {
-			return RemoteLease{}, &ConnectivityError{Server: serverName, Err: fmt.Errorf("failed to connect to lease node %s: %w", serverName, err)}
+			return RemoteLease{}, &ConnectivityError{Server: serverName, Err: fmt.Errorf("failed to connect to lease node %s%s: %w", serverName, reason, err)}
 		}
 		if err := ctx.Err(); err != nil {
 			return RemoteLease{}, err
@@ -135,7 +136,7 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 		if err != nil {
 			return RemoteLease{}, &LockedError{
 				Operation: operation,
-				Err:       fmt.Errorf("cannot acquire remote %s lease on %s: %w", operation, serverName, err),
+				Err:       fmt.Errorf("cannot acquire remote %s lease on %s%s: %w", operation, serverName, reason, err),
 			}
 		}
 		if err := ctx.Err(); err != nil {
@@ -161,6 +162,32 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 		return nil, renewErr
 	}
 	return set, nil
+}
+
+type leaseScopeReasonsKey struct{}
+
+// WithLeaseScopeReasons attaches per-node explanations of why a node outside
+// the selected environment is in an operation's lease set. Lease and
+// connectivity errors for those nodes include the reason.
+func WithLeaseScopeReasons(ctx context.Context, reasons map[string]string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(reasons) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, leaseScopeReasonsKey{}, reasons)
+}
+
+func leaseScopeReasonSuffix(ctx context.Context, serverName string) string {
+	if ctx == nil {
+		return ""
+	}
+	reasons, _ := ctx.Value(leaseScopeReasonsKey{}).(map[string]string)
+	if reason := reasons[serverName]; reason != "" {
+		return " (" + reason + ")"
+	}
+	return ""
 }
 
 func controllerAuthorityServer(cfg *config.Config, targetNames []string) (string, bool, error) {

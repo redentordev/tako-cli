@@ -121,7 +121,25 @@ func parseEnvironmentScopedDocument(data string, isJSON bool, environment string
 		return nil, err
 	}
 	cfg.deferredVariables = missing
+	if dropped := doc.prunedServers(scope, wanted); len(dropped) > 0 {
+		cfg.scopedOutServers = dropped
+	}
 	return cfg, nil
+}
+
+// ScopedOutServers returns the servers LoadConfigForEnvironment removed
+// because they referenced unset ${VAR} names, mapped to those sorted names.
+// Callers that need such a server (for example a prior desired owner of the
+// selected environment) must fail closed instead of skipping it.
+func (c *Config) ScopedOutServers() map[string][]string {
+	if c == nil || len(c.scopedOutServers) == 0 {
+		return nil
+	}
+	result := make(map[string][]string, len(c.scopedOutServers))
+	for name, vars := range c.scopedOutServers {
+		result[name] = append([]string(nil), vars...)
+	}
+	return result
 }
 
 // DeferredEnvironmentVariables returns the sorted unset ${VAR} names that
@@ -363,9 +381,10 @@ func collectReferences(value any, wanted map[string]bool, found map[string]bool)
 }
 
 // prunedServers returns the out-of-scope servers that reference a wanted
-// (unset) name; they cannot be expanded and are removed.
-func (d *scopeDocument) prunedServers(scope environmentScope, wanted map[string]bool) map[string]bool {
-	pruned := map[string]bool{}
+// (unset) name, mapped to the sorted unset names; they cannot be expanded
+// and are removed.
+func (d *scopeDocument) prunedServers(scope environmentScope, wanted map[string]bool) map[string][]string {
+	pruned := map[string][]string{}
 	for name, server := range d.servers() {
 		if scope.hasServer(name) {
 			continue
@@ -374,7 +393,12 @@ func (d *scopeDocument) prunedServers(scope environmentScope, wanted map[string]
 		collectReferences(name, wanted, found)
 		collectReferences(server, wanted, found)
 		if len(found) > 0 {
-			pruned[name] = true
+			vars := make([]string, 0, len(found))
+			for ref := range found {
+				vars = append(vars, ref)
+			}
+			sort.Strings(vars)
+			pruned[name] = vars
 		}
 	}
 	return pruned
@@ -386,7 +410,7 @@ func (d *scopeDocument) prunedServers(scope environmentScope, wanted map[string]
 func (d *scopeDocument) prune(scope environmentScope, wanted map[string]bool) ([]byte, map[int]int, error) {
 	droppedServers := d.prunedServers(scope, wanted)
 	keepEnvironment := func(name string) bool { return scope.environments[name] }
-	keepServer := func(name string) bool { return !droppedServers[name] }
+	keepServer := func(name string) bool { _, dropped := droppedServers[name]; return !dropped }
 
 	if d.isJSON {
 		var buf bytes.Buffer

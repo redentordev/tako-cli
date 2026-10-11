@@ -173,6 +173,43 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 			t.Fatalf("responseHeaders forbidden-name schema misses %q", value)
 		}
 	}
+	trustedItems := schemaPath(t, proxyProperties, "trustedProxies", "items")
+	trustedAlternatives, ok := trustedItems["anyOf"].([]any)
+	if !ok || len(trustedAlternatives) != 2 {
+		t.Fatalf("trustedProxies items = %#v", trustedItems)
+	}
+	if presets := trustedAlternatives[1].(map[string]any)["enum"]; !reflect.DeepEqual(presets, []any{"cloudfront", "cloudflare"}) {
+		t.Fatalf("trustedProxies presets = %#v", presets)
+	}
+	if cidr := regexp.MustCompile(trustedAlternatives[0].(map[string]any)["pattern"].(string)); !cidr.MatchString("203.0.113.0/24") || cidr.MatchString("fastly") {
+		t.Fatalf("trustedProxies CIDR pattern is incorrect")
+	}
+	requestHeaders := schemaPath(t, proxyProperties, "requestHeaders")
+	if requestHeaders["maxProperties"] != float64(32) {
+		t.Fatalf("requestHeaders schema = %#v", requestHeaders)
+	}
+	requestForbidden := regexp.MustCompile(schemaPath(t, requestHeaders, "propertyNames", "not")["pattern"].(string))
+	for _, value := range []string{"Host", "http2-settings", "X-Forwarded-For", "x-real-ip", "FORWARDED", "Transfer-Encoding"} {
+		if !requestForbidden.MatchString(value) {
+			t.Fatalf("requestHeaders forbidden-name schema misses %q", value)
+		}
+	}
+	for _, value := range []string{"X-Forwarded-Host", "X-Forwarded-Proto", "X-Tenant"} {
+		if requestForbidden.MatchString(value) {
+			t.Fatalf("requestHeaders forbidden-name schema rejects %q", value)
+		}
+	}
+	requestValue := regexp.MustCompile(schemaPath(t, requestHeaders, "additionalProperties")["pattern"].(string))
+	for _, value := range []string{"www.example.com", "https", "a b", "x"} {
+		if !requestValue.MatchString(value) {
+			t.Fatalf("requestHeaders value schema rejects %q", value)
+		}
+	}
+	for _, value := range []string{"{http.request.host}", `a"b`, `a\b`, " a", "a ", "a\nb", "a\tb", "café"} {
+		if requestValue.MatchString(value) {
+			t.Fatalf("requestHeaders value schema accepts %q", value)
+		}
+	}
 	acme := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "proxy", "properties", "acme")
 	conditions, ok := acme["allOf"].([]any)
 	if !ok || len(conditions) != 1 {

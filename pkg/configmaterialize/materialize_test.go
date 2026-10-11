@@ -250,6 +250,7 @@ func TestProxyPolicyDesiredStateToExportedYAMLRoundTrip(t *testing.T) {
 		Proxy: &config.ProxyConfig{
 			Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api"}, MaxRequestBody: "10MB",
 			ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
+			RequestHeaders:  map[string]string{"X-Forwarded-Host": "www.example.com"},
 		},
 	}
 	revision, err := takodstate.BuildDesiredRevision(
@@ -277,10 +278,13 @@ func TestProxyPolicyDesiredStateToExportedYAMLRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, fragment := range []string{"denyPathPrefixes:", "- /api/internal", "allowPathPrefixes:", "- /api", "maxRequestBody: 10MB", "X-Content-Type-Options: REDACTED"} {
+	for _, fragment := range []string{"denyPathPrefixes:", "- /api/internal", "allowPathPrefixes:", "- /api", "maxRequestBody: 10MB", "X-Content-Type-Options: REDACTED", "X-Forwarded-Host: REDACTED"} {
 		if !strings.Contains(string(exported), fragment) {
 			t.Fatalf("exported YAML missing %q:\n%s", fragment, exported)
 		}
+	}
+	if !hasWarning(warnings, "proxy_request_header_values_redacted", "web") {
+		t.Fatalf("warnings = %#v", warnings)
 	}
 	if !hasWarning(warnings, "proxy_response_header_values_redacted", "web") {
 		t.Fatalf("warnings = %#v", warnings)

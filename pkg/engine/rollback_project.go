@@ -369,6 +369,7 @@ func (e *Engine) PlanRollback(ctx context.Context, req RollbackRequest) (_ *Roll
 	outcomes := planRollbackOutcomes(plans, actualState, history)
 
 	deploy := deployer.NewDeployerWithPool(client, cfg, envName, session.sshPool, req.Verbose)
+	e.attachRegistryMinter(deploy)
 	priorDesired, priorAssignments, err := LoadPriorPlacementState(client, cfg, envName)
 	if err != nil {
 		return nil, err
@@ -826,7 +827,7 @@ func (s *RollbackSession) Apply(ctx context.Context) (*RollbackResult, error) {
 
 	// Runtime setup and the placement intent are recorded once for every
 	// planned service before the first service changes.
-	actualBefore, order, err := s.prepareApply(gitInfo)
+	actualBefore, order, err := s.prepareApply(ctx, gitInfo, result.Services)
 	if err != nil {
 		result.Services = notAttemptedOutcomes(result.Services)
 		result.Status = takoapi.StatusFailed
@@ -970,13 +971,17 @@ func (s *RollbackSession) attachSummary(ctx context.Context, result *RollbackRes
 	result.Summary = buildRollbackSummary(e.RedactSensitive, in)
 }
 
-// prepareApply sets up the takod runtime, persists the placement intent for
-// every planned service, and resolves the dependency order. It returns the
-// actual state observed before the first service changes.
-func (s *RollbackSession) prepareApply(gitInfo takodstate.GitInfo) (map[string]*reconcile.ActualService, []string, error) {
+// prepareApply mints provider registry credentials, sets up the takod
+// runtime, persists the placement intent for every planned service, and
+// resolves the dependency order. It returns the actual state observed before
+// the first service changes.
+func (s *RollbackSession) prepareApply(ctx context.Context, gitInfo takodstate.GitInfo, outcomes []RollbackServiceOutcome) (map[string]*reconcile.ActualService, []string, error) {
 	cfg, envName := s.cfg, s.envName
 	order, err := rollbackOrder(s.services, s.req.Verbose)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := preflightRegistryAuth(ctx, s.deployer, projectRollbackRegistryAuthNeeds(s.deployer, s.services, s.targets, outcomes)); err != nil {
 		return nil, nil, err
 	}
 	if err := s.deployer.SetupTakodRuntime(); err != nil {
