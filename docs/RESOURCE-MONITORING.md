@@ -485,6 +485,11 @@ tako monitor --local          # legacy outside checker running on this machine (
 Earlier releases accepted a `monitoring.webhook` that is not public HTTPS.
 Such a webhook now produces a deprecation warning and is never used.
 
+Monitoring only reports. To let takod also restart unhealthy or crashed
+containers on their own node, opt in to [Self-Healing](SELF-HEALING.md). Its
+`gave_up`, `circuit_open` and `action_failed` alerts use kind `selfheal` and
+the same targets.
+
 ---
 
 ## Disk Hygiene

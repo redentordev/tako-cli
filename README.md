@@ -34,7 +34,8 @@ Docs: [Orchestration model](./docs/ORCHESTRATION-MODEL.md) ·
 [Machine interface](./docs/MACHINE-INTERFACE.md) ·
 [CI/CD](./docs/CI-CD.md) · [API/SDK](./docs/API-SDK.md) ·
 [Server setup contract](./docs/SERVER-SETUP-VERSIONING.md) ·
-[Resource monitoring](./docs/RESOURCE-MONITORING.md)
+[Resource monitoring](./docs/RESOURCE-MONITORING.md) ·
+[Self-healing](./docs/SELF-HEALING.md)
 
 ---
 

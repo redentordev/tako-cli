@@ -751,10 +751,59 @@ are not service names start with `@`. Slack and Discord receive only
 | `certificate` | scope | domain | `cert_expiring`, `cert_expired` | `ssl_expiring_soon`, `ssl_expired` / `ssl_renewed` |
 | `node` | node | `reboot-required`, `os-updates`, `clock-sync`, `docker-daemon` | `reboot_required`, `security_updates_pending`, `clock_unsynchronized`, `docker_unreachable` | `node_reboot_required`, `node_security_updates`, `node_clock_unsynchronized`, `node_docker_unreachable` / `node_condition_cleared` |
 | `hygiene` | node | `root`, `docker`, `image-gc` | `reclaim_insufficient`, `state_unreadable` | `disk_reclaim_insufficient`, `image_gc_blocked` / `resource_normal`, `image_gc_resumed` |
-| `selfheal` | reserved | | registered by a later change | |
+| `selfheal` | scope | service, `@node` | `gave_up` (level), `circuit_open` (level, `@node`), `action_failed` (event) | `heal_gave_up`, `heal_circuit_open` / `heal_resumed`, `heal_circuit_closed`; `heal_action_failed` |
 
-Per-service webhooks receive only `service` and `container` subjects (and
-later `selfheal` subjects) of their own service.
+Per-service webhooks receive only `service`, `container` and `selfheal`
+subjects of their own service. `selfheal` details are `container`, `action`,
+`reason`, `code`, `actions` and `breaker`; successful restarts and starts are
+never delivered.
+
+#### Self-healing
+
+Nodes advertising `node.self-healing-v1` serve `GET /v1/heal?project=&environment=&journal=N`
+and `PUT /v1/heal` (`project`, `environment`, `action` `pause|resume|reset`,
+optional `service`, `until`, `indefinite`). See [Self-Healing](SELF-HEALING.md).
+
+`tako heal status --output json` reads every environment node (or
+`--server`) in parallel and returns a `HealStatus` document: `project`,
+`environment`, optional `service`, `status` (`ok`, `disabled`, `attention`,
+`unreachable` or `unsupported`) and `nodes`. Each node has `node`,
+`reachable`, `supported`, optional `error`, `enabled`, `evaluatedAt`,
+`pauses` (`service`, `until`, `createdAt`), `breaker` (`open`, `reason`,
+`openedAt`, `until`, `recentActions`), `services` and `journal`. A service
+has `service`, `state` (`ok`, `watching`, `cooldown`, `gave_up`, `paused`,
+`blocked`, `not-converged`, `disabled`), `skip` (a reason code such as
+`lease_held`, `retention`, `maintenance`, `circuit_open`), `revision`,
+`policy`, `pausedUntil`, `gaveUpAt`, `gaveUpReason`, `recentActions`,
+`lastAction`, `lastActionAt`, `lastReason` and `containers` (`id`, `name`,
+`state`, `failures`, `threshold`, `reason`, `code`, `grace`, `actions`,
+`cooldownUntil`). Journal entries have `time`, `node`, `service`,
+`container`, `revision`, `decision`, `reason`, `code` and `result`. Every
+value is a closed-vocabulary code, a public name, a timestamp or a number.
+
+Exit codes: 0 ok or disabled; 6 a service gave up, a breaker is open, or a
+node could not be read; 4 every node unreachable; 2 no node advertises
+`node.self-healing-v1`.
+
+`tako heal pause|resume|reset --output json` returns a `HealChangeResult`:
+`project`, `environment`, `action`, optional `service`, `pausedUntil`,
+`indefinite`, and per-node `nodes` (`node`, `changed`, `pausedUntil`,
+`indefinite`, `error`). It takes the environment's operation leases. Every
+node is checked for `node.self-healing-v1` before any node changes (exit 2
+otherwise); a failure on some nodes exits 6.
+
+`tako ps --output json` service rows have an additive `heal` object (`state`,
+`skip`, `pausedUntil`, `recentActions`, `lastAction`, `lastActionAt`,
+`lastReason`) when a node reports a policy for the service. The state is the
+worst across the selected nodes. It is absent on older agents.
+
+State events of type `heal.restarted`, `heal.started`, `heal.failed`,
+`heal.gave_up`, `heal.reset`, `heal.paused`, `heal.resumed`,
+`heal.circuit_open` and `heal.circuit_closed` are appended to the
+environment event log with names and reason codes only.
+
+A lease held with operation `self-heal` makes CLI lease acquisition wait up
+to 60s before failing with exit code 3.
 
 `tako stats --output json`
 (point-in-time; `--live` is rejected
@@ -968,7 +1017,7 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `monitor` (`--watch`/`--local` human-only), `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `monitor` (`--watch`/`--local` human-only), `heal status\|pause\|resume\|reset`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), project `rollback` (`deploy.service.*`, including `deploy.service.skipped`), lifecycle hooks in `deploy\|rollback\|promote\|setup` (`hook.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |

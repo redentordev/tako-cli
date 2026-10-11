@@ -179,3 +179,22 @@ No config migration; nothing changes until a config enables `selfHealing` and is
 8. **Apply to previews?** **Yes, inherited from the base like any key.** *Rationale: preview teardown takes the lease and clears converged records, so it is safe.*
 9. **Where do path and TCP health observations come from?** **A per-container probe in the heal loop, reusing the rollout helpers without the smoke check.** *Rationale: monitoring checks domains through the load-balanced proxy, which cannot say which replica is hung.*
 10. **Start a container that exited with code 0 under `restart: no`?** **No; report it as `completed`.** *Rationale: Docker treats exit 0 as intended completion under these policies, and restarting it would undo deliberate one-shot behaviour.*
+
+## Implementation notes
+
+Deviations from the plan above, each the safest equivalent found against the code:
+
+- **Pure logic lives in `pkg/selfheal`** (records, control state, journal, engine with an injected clock), so it is unit-tested on every platform; `pkg/takod/heal*.go` is only glue. Task 2.1's `pkg/takod/heal_record.go` is `pkg/selfheal/record.go` plus `pkg/takod/heal_records.go`.
+- **Record IDs come from the `docker run -d` output** (the full container ID), not an extra `docker inspect`, so reconcile issues no new Docker calls. A restore rebuilds the record from the converging record's `previous` block, matching the retained short IDs by prefix; without it the record is cleared. A warm-only blue-green reconcile leaves the record untouched; a failed rollout stays converging; finalize keeps the new record.
+- **Backup detection** uses running `tako.role=scheduled-backup|backup-verification` containers (from the sampler, and a fresh `docker ps` right before acting) instead of probing the backup directory lock: probing a flock could fail a starting backup.
+- **The backup/restore barrier is taken with `TryAcquire`**; a busy barrier skips the tick instead of queueing behind a restore.
+- **The loop always runs** but idles (no sampling, no probes, no Docker calls) while no desired service on the node has a policy; `active` gates the shared sampler.
+- **`GET /v1/heal` returns the last cached evaluation** and never evaluates, so a status read cannot consume the engine's journal-once decisions. Its default journal length is 20 (`--journal` sets 0-1000) instead of 10.
+- **The breaker alert** is reported per scope with subject `@node` (kind `selfheal` is scope-scoped); the target ledger deduplicates it across scopes. The `selfheal` source is registered by `initSelfHealing`, not with the builtin sources.
+- **Give-up** triggers on the tick where an action is needed and the budget is spent, even inside a cooldown, so a crash loop gives up promptly. An HTTP/TCP restart re-probes once under the lease and proceeds only on a definite failure.
+- **`PUT /v1/heal` is lifecycle-safe but fence-validated** (like `/v1/alerts`). `tako heal pause|resume|reset` therefore takes the environment's operation leases (operation `heal-<action>`) so enrolled workers accept the fenced request, after a capability preflight on every node; D9's "they take no lease" does not hold on enrolled clusters. Pausing while a deploy holds the lease reports the lock (exit 3); healing is blocked during that deploy anyway.
+- **`reset` without `--service`** resets every service of the environment and also closes the node circuit breaker.
+- **Restart policies** are normalized (`on-failure:N` is `on-failure`, empty is `no`).
+- **The capability gate** is in `Deployer.PreflightServiceMutationCapabilities`, which every desired-state-writing command (deploy, rollback, project rollback, promote, scale/start/stop, run, placement apply) already calls, rather than a new `RequireTakodCapabilityContext` call site.
+- **The self-heal lease wait** is in `internal/state` lease acquisition (60s, retry every 2s, fresh request ID per attempt, context-aware). The API SDK's `stateclient` keeps its current behaviour.
+- **Task 6.3** (manual verification on a test server) is not automated here; the behaviours it lists are covered by the takod tests with a fake Docker and real probes against `httptest` servers.

@@ -40,11 +40,11 @@ Prerequisite: `add-takod-health-monitoring` has landed (shared container sampler
 
 ## 5. Docs
 
-- [ ] 5.1 New `docs/SELF-HEALING.md`: what it does and does not do, eligibility, defaults, persistent services, exit 0 vs crash, pausing during incidents, reading `tako heal status`, interaction with `restart` policies, alerts (kind `selfheal`)
-- [ ] 5.2 `docs/CONFIGURATION.md` (`selfHealing` keys), `docs/MACHINE-INTERFACE.md` (`HealStatus`, `HealChangeResult`, `heal.*` events, `ps.heal`, `selfheal` alert kind), `docs/ORCHESTRATION-MODEL.md` (node-local only, no failover), cross-link from `docs/RESOURCE-MONITORING.md`
+- [x] 5.1 New `docs/SELF-HEALING.md`: what it does and does not do, eligibility, defaults, persistent services, exit 0 vs crash, pausing during incidents, reading `tako heal status`, interaction with `restart` policies, alerts (kind `selfheal`)
+- [x] 5.2 `docs/CONFIGURATION.md` (`selfHealing` keys), `docs/MACHINE-INTERFACE.md` (`HealStatus`, `HealChangeResult`, `heal.*` events, `ps.heal`, `selfheal` alert kind), `docs/ORCHESTRATION-MODEL.md` (node-local only, no failover), cross-link from `docs/RESOURCE-MONITORING.md`
 
 ## 6. Verification
 
 - [ ] 6.1 `go build ./...`, `go vet ./...`, full `go test ./...` on Linux with no new failures against master; gofmt clean
-- [ ] 6.2 `openspec validate add-local-self-healing --strict`
+- [x] 6.2 `openspec validate add-local-self-healing --strict`
 - [ ] 6.3 Manual on a test server: hung HTTP replica restarted once while its sibling is untouched; crash-looping service gives up and alerts; deploy during a restart waits and succeeds; `docker stop` on an `unless-stopped` container is reported, not undone; an exit-0 `restart: no` worker stays `completed`; `tako heal pause` stops all actions
