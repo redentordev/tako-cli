@@ -606,6 +606,29 @@ func MetricsEndpoint(collect bool) string {
 	return "/v1/metrics?" + query.Encode()
 }
 
+// Node metrics history and status capabilities (add-server-status-history).
+const (
+	CapabilityNodeMetricsHistoryV1 = "node.metrics-history-v1"
+	CapabilityNodeStatusV1         = "node.status-v1"
+)
+
+// NodeStatusEndpoint is the read-only node condition document.
+const NodeStatusEndpoint = "/v1/node/status"
+
+// MetricsHistoryEndpoint builds a /v1/metrics/history request. since is a
+// duration or RFC3339 timestamp; until and step are optional.
+func MetricsHistoryEndpoint(since, until, step string) string {
+	query := url.Values{}
+	query.Set("since", since)
+	if until != "" {
+		query.Set("until", until)
+	}
+	if step != "" {
+		query.Set("step", step)
+	}
+	return "/v1/metrics/history?" + query.Encode()
+}
+
 func AccessLogsEndpoint(tail int, follow bool) string {
 	query := url.Values{}
 	query.Set("tail", fmt.Sprintf("%d", tail))
