@@ -59,10 +59,25 @@ carries the same result document. Combine with `--output json` to also get
 the bare result document appended after the event stream.
 
 `tako logs --events ndjson` emits service log entries as structured
-`log.line` events on stdout. Each event sets `service`, `node`, and
-`data.data` (the raw log line without the trailing newline); `message`
-contains the human rendering, including the node prefix used for multi-node
-text output. `tako access --events ndjson` mirrors this with `access.line`
+`log.line` events on stdout. Each event sets `service`, `node`,
+`data.service`, `data.node`, and `data.data` (the raw log line without the
+trailing newline). When the node agent knows them, events also carry
+`data.replica` (the `tako.slot` replica number, or `run` for job runs),
+`data.container`, `data.revision`, `data.stream` (`stdout` or `stderr`, the
+container stream the line was written to), and `data.time` (the Docker
+timestamp, RFC3339Nano); legacy agents omit these keys. `message` contains
+the human rendering: a `service.slot@node` source prefix padded to a common
+width when more than one source is shown, preceded by the timestamp with
+`--timestamps`. `message` never contains ANSI color escapes (terminal colors
+are applied only by the human renderer). With `-f`, a node agent that
+advertises `logs.stream-v1` attaches containers started after the stream
+began (rolling deploys, restarts, job runs). Stream lifecycle notices are
+`phase.started` events (phase `logs`) distinguished by `data.event`:
+`source.attached`/`source.detached` (debug level; `data.service`,
+`data.replica`, `data.container`), `run.started`/`run.finished` for
+followed job runs (`data.job`, `data.container`, and `data.exitCode` when
+known), and `run.waiting` when a followed job has no run in progress. A node that fails mid-stream emits a `warning` event immediately
+with `data.node` and `data.error`. `tako access --events ndjson` mirrors this with `access.line`
 events carrying the raw proxy access-log entry in `data.data`, the source
 node in `data.node`, and the formatted rendering in `message`.
 
@@ -112,8 +127,17 @@ empty when no container defines a health check or the node agent predates
 health capture. `nodes` breaks placement down per selected node (`name`,
 `running`, `warming`, `health`); nodes not running the service are omitted,
 and job/run rows carry no breakdown. `tako logs` returns a
-`LogsResult` document with project, environment, service, tail/follow options,
-per-node stream outcomes, timings, and `error` when any node stream failed.
+`LogsResult` document with project, environment, `services` (the resolved
+selection; `service` is still set when exactly one is selected), `tail`,
+`follow`, `since`, `until`, `grep` (redacted), `ignoreCase`, `timestamps`,
+per-node stream outcomes (`name`, `host`, `status`, `error`, `lines`,
+`sources`), timings, `status` (`success`, `partial`, or `failed`), and
+`error` when any node stream failed. `partial` means at least one node
+streamed while another failed; it exits 6. When every node fails the exit
+code is 4 if all failures were connectivity failures, 2 if every node lacks
+the `logs.stream-v1` capability a requested feature needs (run `tako upgrade
+servers`), and 1 otherwise. A run that finds no matching container on any
+node fails with exit 1.
 `tako access` returns an `AccessResult` document with the same shape (project,
 environment, optional service filter, tail/follow options, per-node stream
 outcomes, timings, `error`); the log entries themselves stream as
@@ -317,7 +341,9 @@ like exec — machine modes exit 0 whenever the run completed while text mode
 mirrors the job's exit code. Job services appear in the `StatusResult` with
 `kind: "job"`, their `schedule`, the last run's status (`lastRun`), and
 `nextRun` instead of replica counts; `tako logs JOB` returns the recorded
-output of the latest run (no `--follow`). Deploys reconcile job schedules
+output of the latest run (filtered by `--grep`/`--tail`, selected by
+`--since`/`--until`), and `tako logs JOB -f` streams the run in progress and
+every later run on the job's owning node. Deploys reconcile job schedules
 declaratively and emit `deploy.jobs.applied` events per node. `tako proxy
 hash-password` returns a `ProxyHashPasswordResult` with the bcrypt `cost` and
 `hash` for `proxy.basicAuth.passwordBcrypt`; the plaintext password is read
@@ -333,6 +359,14 @@ instead of silently falling back to daemon logging defaults. The private
 reconcile request carries the normalized `driver`, `maxSize`, and `maxFiles`
 values. These fields and capability names are additive, but clients must not
 send a configured feature to an agent that lacks its capability.
+
+`tako logs` probes each node for `logs.stream-v1`, which serves the framed
+`POST /v1/logs/stream` endpoint (NDJSON frames of type `line`, `source`,
+`run`, `ready`, then a terminal `end` or `error`). A node without it falls
+back to the legacy `GET /v1/logs` stream for a plain single-service request
+(no `--since`, `--until`, `--grep`, `--timestamps`, multiple services, or
+job follow); a request that needs any of those fails for that node with a
+capability error naming `tako upgrade servers`.
 
 ### Terminal stream contract (ptystream)
 
@@ -473,7 +507,7 @@ the target `servers`, and exit with code 2.
 | 3 | Another operation holds the local state lock or a remote lease. Retry later; see `tako state lease`. |
 | 4 | SSH/node connectivity failure. |
 | 5 | Cancelled (signal/timeout). |
-| 6 | Partial success needing operator attention (for example strict domain checks still pending). |
+| 6 | Partial success needing operator attention (for example strict domain checks still pending, or `tako logs` streaming from some nodes while others failed). |
 
 The mapping is derived from typed engine error classes
 (`pkg/engine.Classify`); errors that predate the taxonomy report 1.
@@ -483,6 +517,16 @@ The mapping is derived from typed engine error classes
 - Service environment values and SSH passwords are registered with a
   redactor before any event is emitted; event messages and string data
   values pass through it.
+- Secret values referenced by a service's `secrets:` list are registered
+  too, whether they come from `.tako/secrets*` files or from
+  `secretSources` providers, and including aliased references
+  (`API_KEY:STRIPE_KEY` registers the value of `STRIPE_KEY`). `logs`
+  registers them for the selected services and jobs; `deploy`, `exec`,
+  `jobs`, `rollback`, `promote`, and `scale` register them before emitting
+  output. If secrets cannot be resolved (provider CLI missing or failing,
+  missing keys) `logs`, `rollback`, `promote`, and `scale` emit one
+  `warning` event with `data.reason: "secrets-unresolved"` stating that
+  those values will not be redacted, and continue.
 - Registry passwords from the top-level `registries:` block are registered
   with the same redactor. Config validation rejects literal registry
   passwords before environment expansion — they must be `${ENV_VAR}`

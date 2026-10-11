@@ -525,8 +525,8 @@ tako deploy --env production
 
 Like Kamal's `.kamal/secrets` + `kamal secrets fetch`, `secretSources` keep the
 secret store as the source of truth: Tako reads the values live every time it
-resolves secrets (`deploy`, `exec`, `jobs`, `secrets validate`, `doctor`), and
-nothing is written to disk. Sources hold only provider selectors, so they are
+resolves secrets (`deploy`, `exec`, `jobs`, `logs`, `rollback`, `promote`,
+`scale`, `secrets validate`, `doctor`), and nothing is written to disk. Sources hold only provider selectors, so they are
 safe to commit.
 
 ```yaml
@@ -559,7 +559,11 @@ environments:
 Precedence, lowest to highest: `.tako/secrets`, `.tako/secrets.<env>`,
 top-level `secretSources`, then environment `secretSources` (later sources
 override earlier ones). Each source is fetched once per command and its values
-are registered with the output redactor. Source fields mirror the
+are registered with the output redactor, so `tako logs` and health-check
+failures in `rollback`/`promote`/`scale` mask them (aliased refs such as
+`API_KEY:STRIPE_KEY` mask the value of `STRIPE_KEY`). If a source cannot be
+fetched, `logs`, `rollback`, `promote`, and `scale` print one warning that the values will not
+be redacted and continue. Source fields mirror the
 `tako secrets fetch` flags below (`names`, `path`, `from`, `profile`,
 `region`, `vault`, `project`, `providerEnv`, `prefixStrip`, `map`). Provider
 credentials come from each CLI's own login or environment variables (for

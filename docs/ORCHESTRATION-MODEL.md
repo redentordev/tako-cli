@@ -464,7 +464,9 @@ node in the same pass.
 
 `tako jobs` lists schedules with next/last runs, `tako jobs runs [JOB]`
 shows history, `tako jobs trigger JOB` fires a run immediately and streams
-its output, and `tako logs JOB` prints the latest run's recorded output.
+its output, `tako logs JOB` prints the latest run's recorded output, and
+`tako logs JOB -f` streams the current and every later run on the job's
+owning node.
 In plans and `tako ps`, a job's actual state is its registered schedule —
 not container presence — so an idle job is "up-to-date", never drift.
 
