@@ -47,6 +47,8 @@ type ContainerSample struct {
 	Image    string
 	Revision string
 	Active   string
+	// Role is the tako.role label (e.g. scheduled-backup).
+	Role string
 }
 
 func containerAlertSourceSpec() AlertSourceSpec {
@@ -189,7 +191,7 @@ func (s *containerAlertSampler) SampleOnce(ctx context.Context) {
 				ExitCode: document.State.ExitCode, RestartPolicy: document.HostConfig.RestartPolicy.Name,
 				MemoryLimitMB: document.HostConfig.Memory / (1 << 20),
 				Image:         document.Config.Image, Revision: document.Config.Labels["tako.revision"],
-				Active: document.Config.Labels["tako.active"],
+				Active: document.Config.Labels["tako.active"], Role: document.Config.Labels["tako.role"],
 			}
 			sample.StartedAt, _ = time.Parse(time.RFC3339Nano, document.State.StartedAt)
 			sample.FinishedAt, _ = time.Parse(time.RFC3339Nano, document.State.FinishedAt)

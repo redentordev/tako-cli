@@ -1539,10 +1539,30 @@ func checkContainerSmoke(ctx context.Context, networkName string, containerName 
 	return checkContainerHTTPPath(ctx, networkName, containerName, health, health.SmokePath, port, expectedStatus, "smoke")
 }
 
+// containerNetworkIPFunc resolves a container's IP; tests replace it.
+var containerNetworkIPFunc = containerNetworkIP
+
+// healthTargetError marks a probe that could not reach the point of judging
+// the container (its address could not be resolved). The message is the
+// wrapped error's, unchanged.
+type healthTargetError struct{ err error }
+
+func (e *healthTargetError) Error() string { return e.err.Error() }
+func (e *healthTargetError) Unwrap() error { return e.err }
+
+// healthStatusError is an HTTP health response outside the accepted range.
+// The message is unchanged from the plain error it replaces.
+type healthStatusError struct {
+	status  int
+	message string
+}
+
+func (e *healthStatusError) Error() string { return e.message }
+
 func checkContainerHTTPPath(ctx context.Context, networkName string, containerName string, health *HealthSpec, path string, port int, expectedStatus int, label string) error {
-	ip, err := containerNetworkIP(ctx, networkName, containerName)
+	ip, err := containerNetworkIPFunc(ctx, networkName, containerName)
 	if err != nil {
-		return err
+		return &healthTargetError{err: err}
 	}
 	if port <= 0 {
 		return fmt.Errorf("HTTP %s port is required", label)
@@ -1568,20 +1588,20 @@ func checkContainerHTTPPath(ctx context.Context, networkName string, containerNa
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if expectedStatus != 0 {
 		if response.StatusCode != expectedStatus {
-			return fmt.Errorf("HTTP %s returned status %d, expected %d", label, response.StatusCode, expectedStatus)
+			return &healthStatusError{status: response.StatusCode, message: fmt.Sprintf("HTTP %s returned status %d, expected %d", label, response.StatusCode, expectedStatus)}
 		}
 		return nil
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 400 {
-		return fmt.Errorf("HTTP %s returned status %d", label, response.StatusCode)
+		return &healthStatusError{status: response.StatusCode, message: fmt.Sprintf("HTTP %s returned status %d", label, response.StatusCode)}
 	}
 	return nil
 }
 
 func checkContainerTCPHealth(ctx context.Context, networkName string, containerName string, health *HealthSpec) error {
-	ip, err := containerNetworkIP(ctx, networkName, containerName)
+	ip, err := containerNetworkIPFunc(ctx, networkName, containerName)
 	if err != nil {
-		return err
+		return &healthTargetError{err: err}
 	}
 	timeout := healthCheckTimeout(health)
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
