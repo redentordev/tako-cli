@@ -416,6 +416,10 @@ verified:
   then holds the selected environment's lease on that node for the same window
   and warns that other environments and projects on the node are not fenced.
   The first `tako upgrade servers` after updating the CLI takes this path.
+- [Self-healing](SELF-HEALING.md) does not act while the maintenance lease is
+  live (`tako heal status` reports `lease_held`). When the only environment
+  leases on the node are short `self-heal` leases, the command waits for them
+  (at most their expiry, capped at five minutes) instead of exiting 3.
 - A node whose takod does not answer is upgraded or set up without a lease:
   no agent is running that could grant environment leases.
 

@@ -216,6 +216,37 @@ func TestHealNeverActsDuringDeployLease(t *testing.T) {
 	}
 }
 
+func TestHealNeverActsDuringNodeMaintenanceLease(t *testing.T) {
+	f := newHealFixture(t)
+	f.crashedWeb()
+	response, err := AcquireNodeMaintenanceLease(context.Background(), f.dataDir, NodeMaintenanceLeaseRequest{ID: "maint-1", Operation: "upgrade-servers", Who: "cli", TTLSeconds: 900})
+	if err != nil || !response.Acquired {
+		t.Fatalf("maintenance lease: %+v %v", response, err)
+	}
+	f.manager.Tick(context.Background())
+	if got := f.actions(); len(got) != 0 {
+		t.Fatalf("healed during a node maintenance lease: %v", got)
+	}
+	status := f.manager.Status("demo", "production", 0)
+	if len(status.Services) != 1 || status.Services[0].State != selfheal.StateBlocked || status.Services[0].Skip != selfheal.SkipLeaseHeld {
+		t.Fatalf("status = %+v", status.Services)
+	}
+	// The executor's own lease acquisition is refused too.
+	candidate := selfheal.Candidate{Project: "demo", Environment: "production", Service: "web", Revision: "r1", Action: selfheal.ActionStart,
+		Container: selfheal.RecordContainer{Name: "demo_production_web_1", ID: healWebID}, Reason: selfheal.ReasonExitedNonzero}
+	f.manager.executor.Execute(context.Background(), candidate)
+	if got := f.actions(); len(got) != 0 {
+		t.Fatalf("executor acted under a node maintenance lease: %v", got)
+	}
+	if _, err := ReleaseNodeMaintenanceLease(context.Background(), f.dataDir, NodeMaintenanceLeaseRequest{ID: "maint-1"}); err != nil {
+		t.Fatal(err)
+	}
+	f.manager.Tick(context.Background())
+	if got := f.actions(); len(got) != 1 {
+		t.Fatalf("actions after maintenance released = %v, want one start", got)
+	}
+}
+
 func TestHealHoldsSelfHealLeaseOnlyDuringAction(t *testing.T) {
 	f := newHealFixture(t)
 	f.crashedWeb()

@@ -95,30 +95,84 @@ func AcquireNodeMaintenanceLease(ctx context.Context, req NodeMaintenanceLeaseRe
 	}, nil
 }
 
+// selfHealLeaseOperation is the environment lease operation takod's local
+// self-healing holds while it restarts or starts one container.
+const selfHealLeaseOperation = "self-heal"
+
+// nodeMaintenanceSelfHealWait caps how long a maintenance lease waits for
+// self-heal holders, which are short and released right after one docker
+// call; it equals takod's self-heal lease TTL. Tests shorten both.
+var (
+	nodeMaintenanceSelfHealWait  = 5 * time.Minute
+	nodeMaintenanceSelfHealRetry = 2 * time.Second
+)
+
 func acquireNodeMaintenanceLeaseV1(ctx context.Context, req NodeMaintenanceLeaseRequest) (*NodeMaintenanceLease, error) {
 	id, err := newNodeMaintenanceLeaseID()
 	if err != nil {
 		return nil, err
 	}
 	who := nodeMaintenancePrincipal()
-	output, err := takodclient.RequestJSONWithContext(ctx, req.Client, req.Socket, "POST", nodeMaintenanceLeaseEndpoint, takod.NodeMaintenanceLeaseRequest{
-		ID:         id,
-		Operation:  req.Operation,
-		Who:        who,
-		PID:        os.Getpid(),
-		TTLSeconds: int64(NodeMaintenanceLeaseTTL / time.Second),
-	})
-	if err != nil {
-		return nil, &ConnectivityError{Server: req.Server, Err: fmt.Errorf("acquire node maintenance lease on %s: %w", req.Server, err)}
+	started := time.Now()
+	for {
+		output, err := takodclient.RequestJSONWithContext(ctx, req.Client, req.Socket, "POST", nodeMaintenanceLeaseEndpoint, takod.NodeMaintenanceLeaseRequest{
+			ID:         id,
+			Operation:  req.Operation,
+			Who:        who,
+			PID:        os.Getpid(),
+			TTLSeconds: int64(NodeMaintenanceLeaseTTL / time.Second),
+		})
+		if err != nil {
+			return nil, &ConnectivityError{Server: req.Server, Err: fmt.Errorf("acquire node maintenance lease on %s: %w", req.Server, err)}
+		}
+		var response takod.NodeMaintenanceLeaseResponse
+		if err := json.Unmarshal([]byte(output), &response); err != nil {
+			return nil, fmt.Errorf("parse node maintenance lease response from %s: %w", req.Server, err)
+		}
+		if response.Acquired {
+			return &NodeMaintenanceLease{Server: req.Server, client: req.Client, socket: req.Socket, id: id, operation: req.Operation, who: who}, nil
+		}
+		// Only self-heal holders: wait for the restart to finish (or its
+		// lease to expire) instead of failing the upgrade or setup.
+		deadline, wait := selfHealOnlyDeadline(started, response.Holders)
+		if !wait || !time.Now().Add(nodeMaintenanceSelfHealRetry).Before(deadline) {
+			return nil, nodeMaintenanceLockedError(req, response)
+		}
+		timer := time.NewTimer(nodeMaintenanceSelfHealRetry)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, nodeMaintenanceLockedError(req, response)
+		case <-timer.C:
+		}
 	}
-	var response takod.NodeMaintenanceLeaseResponse
-	if err := json.Unmarshal([]byte(output), &response); err != nil {
-		return nil, fmt.Errorf("parse node maintenance lease response from %s: %w", req.Server, err)
+}
+
+// selfHealOnlyDeadline reports whether every holder is a self-heal lease and,
+// if so, when waiting for them stops: the latest holder expiry plus one retry,
+// never later than nodeMaintenanceSelfHealWait after the first attempt.
+func selfHealOnlyDeadline(started time.Time, holders []takod.LeaseInfo) (time.Time, bool) {
+	if len(holders) == 0 {
+		return time.Time{}, false
 	}
-	if !response.Acquired {
-		return nil, nodeMaintenanceLockedError(req, response)
+	limit := started.Add(nodeMaintenanceSelfHealWait)
+	var latest time.Time
+	for _, holder := range holders {
+		if holder.Operation != selfHealLeaseOperation {
+			return time.Time{}, false
+		}
+		if holder.ExpiresAt.IsZero() {
+			return limit, true
+		}
+		if holder.ExpiresAt.After(latest) {
+			latest = holder.ExpiresAt
+		}
 	}
-	return &NodeMaintenanceLease{Server: req.Server, client: req.Client, socket: req.Socket, id: id, operation: req.Operation, who: who}, nil
+	deadline := latest.Add(nodeMaintenanceSelfHealRetry)
+	if deadline.After(limit) {
+		return limit, true
+	}
+	return deadline, true
 }
 
 func nodeMaintenanceLockedError(req NodeMaintenanceLeaseRequest, response takod.NodeMaintenanceLeaseResponse) error {

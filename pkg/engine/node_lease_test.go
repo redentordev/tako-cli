@@ -158,6 +158,56 @@ func TestNodeMaintenanceLeaseFailsFastOnLiveEnvironmentLease(t *testing.T) {
 	}
 }
 
+func shortenSelfHealWait(t *testing.T, wait, retry time.Duration) {
+	t.Helper()
+	oldWait, oldRetry := nodeMaintenanceSelfHealWait, nodeMaintenanceSelfHealRetry
+	nodeMaintenanceSelfHealWait, nodeMaintenanceSelfHealRetry = wait, retry
+	t.Cleanup(func() { nodeMaintenanceSelfHealWait, nodeMaintenanceSelfHealRetry = oldWait, oldRetry })
+}
+
+func TestNodeMaintenanceLeaseWaitsForSelfHealHolder(t *testing.T) {
+	shortenSelfHealWait(t, 5*time.Second, 5*time.Millisecond)
+	node := newFakeLeaseNode()
+	node.environment["app/production"] = takod.LeaseInfo{ProjectName: "app", Environment: "production", Operation: selfHealLeaseOperation, Who: "takod/s1", ExpiresAt: time.Now().Add(5 * time.Minute)}
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		node.mu.Lock()
+		delete(node.environment, "app/production")
+		node.mu.Unlock()
+	}()
+	agent := &fakeLeaseAgent{node: node, capable: true}
+	lease, err := AcquireNodeMaintenanceLease(context.Background(), maintenanceLeaseRequest(agent, "upgrade-servers"))
+	if err != nil {
+		t.Fatalf("maintenance lease did not wait for the self-heal holder: %v", err)
+	}
+	if lease == nil || node.maintenance == nil {
+		t.Fatal("maintenance lease not recorded after the self-heal lease was released")
+	}
+}
+
+func TestNodeMaintenanceLeaseSelfHealWaitIsBounded(t *testing.T) {
+	shortenSelfHealWait(t, 40*time.Millisecond, 5*time.Millisecond)
+	node := newFakeLeaseNode()
+	node.environment["app/production"] = takod.LeaseInfo{ProjectName: "app", Environment: "production", Operation: selfHealLeaseOperation, Who: "takod/s1", ExpiresAt: time.Now().Add(5 * time.Minute)}
+	agent := &fakeLeaseAgent{node: node, capable: true}
+	_, err := AcquireNodeMaintenanceLease(context.Background(), maintenanceLeaseRequest(agent, "upgrade-servers"))
+	if err == nil || Classify(err) != ClassLocked || !strings.Contains(err.Error(), "self-heal by takod/s1") {
+		t.Fatalf("bounded self-heal wait err = %v", err)
+	}
+}
+
+func TestNodeMaintenanceLeaseDoesNotWaitForMixedHolders(t *testing.T) {
+	shortenSelfHealWait(t, time.Hour, 5*time.Millisecond)
+	node := newFakeLeaseNode()
+	node.environment["app/production"] = takod.LeaseInfo{ProjectName: "app", Environment: "production", Operation: selfHealLeaseOperation, Who: "takod/s1", ExpiresAt: time.Now().Add(5 * time.Minute)}
+	node.environment["app/preview"] = takod.LeaseInfo{ProjectName: "app", Environment: "preview", Operation: "deploy", Who: "ci@runner", ExpiresAt: time.Now().Add(10 * time.Minute)}
+	agent := &fakeLeaseAgent{node: node, capable: true}
+	_, err := AcquireNodeMaintenanceLease(context.Background(), maintenanceLeaseRequest(agent, "upgrade-servers"))
+	if err == nil || Classify(err) != ClassLocked {
+		t.Fatalf("mixed holders err = %v, want immediate locked error", err)
+	}
+}
+
 func TestNodeMaintenanceLeaseFallsBackToEnvironmentLeaseOnOlderAgent(t *testing.T) {
 	node := newFakeLeaseNode()
 	agent := &fakeLeaseAgent{node: node, capable: false}

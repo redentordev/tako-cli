@@ -125,7 +125,8 @@ container started and until 5m after the record was written.
 
 takod skips an environment while another operation holds its lease (deploy,
 rollback, scale, preview teardown and so on), while a controller operation
-fences the worker, during a node upgrade or a pending volume restore, while
+fences the worker, while the node maintenance lease is held (`tako upgrade
+servers`, `tako setup`), during a node upgrade or a pending volume restore, while
 the node is not schedulable or has a deployment-deny latch, and while a pause
 is active.
 
@@ -149,7 +150,9 @@ more), and otherwise leaves the lease to expire at its TTL rather than
 letting a deploy race a daemon that is still working.
 
 A CLI operation that finds a `self-heal` lease waits for it until the lease
-expires (at most 5m) before reporting the lock (exit 3).
+expires (at most 5m) before reporting the lock (exit 3). The node maintenance
+lease taken by `tako upgrade servers` and `tako setup` waits the same way when
+`self-heal` leases are the only holders on the node.
 
 **Upgrading.** CLIs older than this release do not wait on `self-heal`
 leases: a deploy that meets one fails at once with the lock (exit 3) and can

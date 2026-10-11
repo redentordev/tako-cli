@@ -478,6 +478,15 @@ func (h *healManager) scopeSkip(project, environment string, now time.Time) stri
 	if lease != nil && now.Before(lease.ExpiresAt) {
 		return selfheal.SkipLeaseHeld
 	}
+	// A node maintenance lease (upgrade, setup) excludes every environment
+	// on the node; AcquireLease refuses the self-heal lease too.
+	maintenance, err := ReadNodeMaintenanceLease(context.Background(), h.dataDir)
+	if err != nil {
+		return selfheal.SkipStateUnreadable
+	}
+	if maintenance.Lease != nil {
+		return selfheal.SkipLeaseHeld
+	}
 	return ""
 }
 
