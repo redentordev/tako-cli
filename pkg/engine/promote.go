@@ -113,6 +113,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		e.RegisterSecret(server.Password)
 	}
 	e.RegisterACMEDNSSecrets(cfg)
+	e.registerServiceSecretValuesOrWarn(cfg, envName, services, events.PhaseDeploy)
 
 	stateLock := localstate.NewStateLock(".tako")
 	lockInfo, err := stateLock.Acquire("promote")

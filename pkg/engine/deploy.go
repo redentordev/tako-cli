@@ -243,7 +243,8 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 			e.RegisterSecret(value)
 		}
 	}
-	e.registerServiceSecretValues(cfg, session.envName, allServices)
+	// Unresolvable secrets fail the deploy later, when env files are built.
+	_ = e.registerServiceSecretValues(cfg, session.envName, allServices)
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
 	}

@@ -491,14 +491,8 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 	// Then add secrets (string array format)
 	for _, secretRef := range service.Secrets {
 		// Support aliasing format: CONTAINER_VAR:SECRET_KEY
-		parts := strings.SplitN(secretRef, ":", 2)
-
-		containerVar := parts[0]
-		secretKey := containerVar // Default: same as container var
-
-		if len(parts) == 2 {
-			secretKey = parts[1]
-		}
+		containerVar, _, _ := strings.Cut(secretRef, ":")
+		secretKey := SecretRefKey(secretRef)
 
 		// Get the secret value
 		value, err := m.Get(secretKey)

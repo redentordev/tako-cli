@@ -134,6 +134,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 		e.RegisterSecret(server.Password)
 	}
 	e.RegisterACMEDNSSecrets(cfg)
+	e.registerServiceSecretValuesOrWarn(cfg, envName, services, events.PhaseDeploy)
 
 	e.info(events.TypeDeployStarted, events.PhaseDeploy, fmt.Sprintf("Scaling %d service(s) on %d takod node(s)...\n\n", len(scaleTargets), len(serverNames)))
 
