@@ -702,7 +702,11 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 	if plan.IsEmpty() && !deployplan.HasBuildServices(services) && !req.Force {
 		if err := s.deployer.ApplyAlertPolicy(); err != nil {
-			return nil, fmt.Errorf("failed to apply scheduler alert policy: %w", err)
+			if !isDefaultOnlyAlertPolicyError(err) {
+				return nil, fmt.Errorf("failed to apply scheduler alert policy: %w", err)
+			}
+			// Default-derived monitoring never fails a deploy.
+			e.warn(events.PhaseDeploy, fmt.Sprintf("  ⚠ %s\n", alertPolicyWarning(err)))
 		}
 		intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredStateServices, nil, actualState)
 		var baseline *takodstate.DesiredRevision
@@ -1050,12 +1054,13 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 	}
 	if !deploymentFailed {
+		// The rollout already succeeded: an alert configuration push failure
+		// (for example a node rejecting it on low disk) is a warning in the
+		// summary, never a failed deploy.
 		if err := s.deployer.ApplyAlertPolicy(); err != nil {
-			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ scheduler alert policy reconciliation failed: %v\n", err)})
-			deploymentFailed = true
-			deploymentError = fmt.Errorf("scheduler alert policy reconciliation failed: %w", err)
-			deployment.Status = remotestate.StatusFailed
-			deployment.Error = err.Error()
+			warning := alertPolicyWarning(err)
+			e.warn(events.PhaseDeploy, fmt.Sprintf("  ⚠ %s\n", warning))
+			applyState.warnings = append(applyState.warnings, warning)
 		}
 	}
 

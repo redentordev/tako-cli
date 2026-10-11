@@ -40,11 +40,35 @@ func (d *Deployer) PreflightAlertPolicy() error {
 	return nil
 }
 
+// AlertPolicyApplyError is an ApplyAlertPolicy failure. DefaultOnly is set
+// when the request carried only default-derived node-side monitoring (no
+// explicit monitoring keys and no job/backup policy): such a failure must
+// never fail a deploy.
+type AlertPolicyApplyError struct {
+	DefaultOnly bool
+	Err         error
+}
+
+func (e *AlertPolicyApplyError) Error() string { return e.Err.Error() }
+func (e *AlertPolicyApplyError) Unwrap() error { return e.Err }
+
+// ApplyAlertPolicy pushes the alert configuration to the environment's
+// nodes. Push failures are returned as *AlertPolicyApplyError.
 func (d *Deployer) ApplyAlertPolicy() error {
 	request, plan, err := d.fullAlertRequest()
 	if err != nil {
 		return err
 	}
+	if err := d.applyAlertPolicy(request, plan); err != nil {
+		return &AlertPolicyApplyError{
+			DefaultOnly: plan.enabled() && !plan.Explicit && !alertPolicyEnabled(request.Policy),
+			Err:         err,
+		}
+	}
+	return nil
+}
+
+func (d *Deployer) applyAlertPolicy(request takod.AlertConfigRequest, plan healthAlertPlan) error {
 	for _, warning := range plan.Warnings {
 		d.warnf("%s", warning)
 	}
