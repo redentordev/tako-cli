@@ -2,30 +2,48 @@
 
 ## Context
 
-See proposal.md for motivation and specs/deploy-leases/spec.md and specs/mesh-networking/spec.md for the behavior contract. Observed current state (pre-change citations):
+See proposal.md for motivation and specs/deploy-leases/spec.md and specs/mesh-networking/spec.md for the behavior contract. Observed current state (master 20caafe):
 
 - **Lease acquisition.** `AcquireRemoteOperationLeasesContext` (`pkg/engine/leases.go:99-164`):
   - If any server is enrolled (`ClusterID`/`NodeID`), it takes one controller lease (`:205-298`).
-  - Otherwise it takes a per-node lease through `remotestate...AcquireLeaseContext(ctx, op, envName, DefaultLeaseTTL)` (`:133-134`), in parallel with no quorum (`AcquireRemoteOperationLeasesWithContext`, `:467-561`). Any failure releases everything and returns `failed to acquire remote %s leases` as `LockedError`/`ConnectivityError`.
+  - Otherwise it takes a per-node lease through `manager.AcquireLeaseContext(ctx, operation, envName, DefaultLeaseTTL)` (`:133-134`), in parallel with no quorum. Any failure releases everything and returns a `LockedError` or a `ConnectivityError` (`:127`).
   - The node lease file is `<dataDir>/leases/<project>/<env>.json` (`pkg/takod/lease.go:337-342`), so leases are already per `(project, env)`.
-  - `deployConsistency` accepts only `lease` and `onUnreachableNode` only `block` (`pkg/config/types.go:141-144`, `validator.go:402-424`).
-- **Deploy lease set** (`pkg/engine/deploy.go:390-421`). It is `DeployMutationTargets(cfg, allServices, assignments)` ∪ `AddPriorDesiredMutationTargets` ∪ `connectivityServerNames` (the environment's servers, `:265`). `DeployMutationTargets` (`takod.go:93-125`) adds every `cfg.Servers` edge when any service is proxied, every builder through `DeployLeaseTargets` (`:59-87`), and the controller. `HasPlatformRole` (`types.go:293-303`) is true for role-less servers. **This is the #114 bug.** Setup targets are already intersected with environment servers (`deploy.go:395-408`), so the over-reach affects leases and connectivity, not workload placement.
-- **Other operations** already lease environment servers only: rollback `rollback.go:158-183`, project rollback `rollback_project.go:276-303`, destroy `destroy.go:269`/`:357`, scale `scale.go:141`/`:477`, promote `promote.go:100/136`, remove `remove.go:119/238`, placement-apply `placement_apply.go:62/100`. `run` leases the single requested server (`run.go:134`). Command-level leases go through `cmd/remote_lease.go:19-22` (backup, cleanup, env push, maintenance, live, certs); each builds its own target list. `cmd/upgrade.go` iterates `cfg.Servers` (`:291`, `:312`, `:352`, `:418`) and takes **no lease**.
-- **Replicated state** is per environment: `getReplicaServers` uses `GetEnvironmentServers(env)` (`internal/state/replicator.go:225-241`); node paths are `/var/lib/tako/{desired,actual}/<project>/<env>` (`pkg/takod/cleanup.go:518-530`).
+  - `deployConsistency` accepts only `lease`, and `onUnreachableNode` accepts only `block` (`pkg/config/types.go:141-144`, `validator.go:402-424`).
+- **Roles.** `ServerConfig.Roles`, `Lifecycle` and `MeshIP` are platform-owned and come only from enrolled inventory (`types.go:277-284`, `yaml:"-"`). In a non-enrolled config every server is role-less, so `HasPlatformRole` (`:293-303`) makes it an edge, a builder and a worker, and `Schedulable()` is always true.
+- **Deploy lease set** (`pkg/engine/deploy.go:390-421`). It is `DeployMutationTargets(cfg, allServices, assignments)`, plus `AddPriorDesiredMutationTargets`, plus `connectivityServerNames` (all environment servers, `:265`, added by `deployMutationAuthorityTargets`, `:592`).
+  - `DeployMutationTargets` (`takod.go:93-125`) adds every `cfg.Servers` edge when a service is proxied, every builder through `DeployLeaseTargets` (`:59-87`), and the controller. **This is the #114 error.**
+  - Setup (mesh) targets are intersected with environment servers (`deploy.go:395-408`).
+- **Proxy placement cannot leave the environment.** `ResolvePlacementTargets` → `validatePlacementTargets` (`pkg/config/placement.go:120-139`) rejects a placement target that is not an environment server. So `ResolveEnvironmentProxyTargets` (`types.go:1001-1029`) always returns a subset of the environment.
+- **Deployer builder and image-source list.**
+  - `remoteBuilderServers` (`pkg/deployer/takod_deploy.go:720-732`) returns every schedulable builder-role server in `cfg.Servers`. It is used by remote builds (`:688-711`, `:764-850`; the source is `sources[0]` per platform) and by `locateRetainedImage` (`:939-960`).
+  - Both call `groupTakodNodesByPlatform` (`:1224`), which contacts every listed server.
+  - `placementApplyTargets` (`pkg/engine/placement_apply.go:214-239`) adds every edge-role server when a service is proxied.
+- **Other operations** lease environment servers only:
+  - rollback `rollback.go:165,183`, project rollback `rollback_project.go:284,303`;
+  - destroy `destroy.go:269`/`:357`, scale `scale.go:477-481`, promote `promote.go:100-136`, remove `remove.go:119/238`;
+  - `run` leases the single requested server (`run.go:132-134`).
+
+  Command-level leases (backup, cleanup, env push, maintenance, live, certs) each build their own target list. `cmd/upgrade.go` takes **no lease**. Non-enrolled upgrades target environment servers (`upgradeTargetServers` → `setupTargetServers`, `:289-299`), and enrolled upgrades use the cluster upgrade coordinator lock (`:211-218`).
+- **Replicated state** is per environment: `getReplicaServers` uses `GetEnvironmentServers(env)` (`internal/state/replicator.go:225-241`). Node paths are `/var/lib/tako/{desired,actual}/<project>/<env>`.
 - **Mesh.**
-  - `SetupTakodRuntime` (`pkg/deployer/takod_deploy.go:102-138`) runs on `getTakodTargetServers` (`:2624-2639`, the setup targets).
-  - It fetches keys (`ensureTakodMeshKeys`, `:2473`), builds peers with positional addresses (`buildTakodMeshPeers` `:2547-2569`, `meshAddress(i)` `:2594-2608`; `meshAddressForServer` honours only the internal platform `MeshIP`, `:2610-2622`, `types.go:279`), and then writes `/v1/metadata` and `/v1/mesh/apply` per node (`prepareTakodNode`, `:1470-1539`).
-  - Each node keeps a single `<dataDir>/node.json` and `<dataDir>/mesh/peers.json` (`pkg/takod/metadata.go:34,41`), tagged with Project/Environment.
-  - Any unreachable member fails the step (`:2528-2543`, `takodNodeActionsError` `:1443-1467`).
-  - No migration logic exists.
-- **Environments** select servers with `servers` or `serverSelector` (`GetEnvironmentServers`, `types.go:944-982`). Two environments may list the same server. `environments.<e>.proxy` may place the proxy on specific servers (`ResolveEnvironmentProxyTargets`, `types.go:987-1013`). Imports (`ServiceConfig.Imports`, `:400`) only read other projects' same-environment services and never mutate them.
+  - `SetupTakodRuntime` (`takod_deploy.go:102-138`) runs on `getTakodTargetServers` (`:2624-2639`), which is either the operation's `SetTargetServers` list or the environment list in declaration order.
+  - It verifies agents with `GET /v1/status` (`:143-160`), fetches keys (`POST /v1/mesh/key`, `:2473`) and builds peers with positional addresses (`buildTakodMeshPeers` `:2547-2569`, `meshAddress(i)` `:2594-2608`). Only the internal platform `MeshIP` is honored (`:2610-2622`).
+  - It then writes `PUT /v1/metadata` and `POST /v1/mesh/apply` per node (`prepareTakodNode`, `:1470-1539`). Enrolled nodes skip both.
+  - takod writes `<dataDir>/node.json` and `<dataDir>/mesh/peers.json` (`pkg/takod/metadata.go:22-48`) and returns them as the `node` and `peers` maps of `GET /v1/status` (`server.go:2671-2672`).
+    - `node.json` carries `project`, `environment`, `mesh.address`, `mesh.networkCIDR`, `mesh.interface` and `mesh.publicKey`.
+    - `peers.json` carries `project`, `environment` and `peers[].{name,address,publicKey}` (`takod_deploy.go:37-77`).
+  - `POST /v1/mesh/apply` replaces the whole interface config (`pkg/takod/mesh.go:39-51`).
+  - Callers with narrower or reordered target lists: deploy uses sorted mutation targets ∩ environment, while rollback (`rollback.go:333`), project rollback (`rollback_project.go:393`), scale (`scale.go:188`) and promote (`promote.go:183`) use declaration order. `run` passes one server (`run.go:182`).
+  - Positions are also recomputed by `meshHostIPForServer` (`takod_proxy.go:1140-1166`, proxy upstreams) and `meshHostIPs` (`cmd/domain_hosts.go:183-200`, declaration order, offline).
+- **Environment scoping (v0.14.2, `fix/v0.14.2:pkg/config/environment_scope.go`).** When a config has unset `${VAR}` references, `-e ENV` keeps every top-level section, `ENV` with its extends chain, and the servers `ENV` can use. Those are its `servers` list, placement servers, and every server when `ENV` uses a selector, has no explicit list, or the config is enrolled. Out-of-scope servers that reference unset variables are removed before decoding, and only `DeferredEnvironmentVariables()` records that anything was removed.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- An environment's operations need connectivity only to nodes they mutate.
-- No reduction in safety: any node an operation mutates is leased. Node-global mutations exclude every environment on that node.
-- Shared servers keep working for both environments' mesh traffic.
+- An environment's operations need connectivity only to nodes in that environment, plus nodes that still hold its prior desired assignments.
+- No reduction in safety: any node an operation mutates is leased, and node-global mutations exclude every environment on that node.
+- A node's mesh address never changes because of which operation ran, its target subset, server declaration order, or which environment variables are exported.
+- Shared servers keep working for every environment's and project's mesh traffic once takod supports peer sets.
 - Existing meshes keep their addresses.
 
 **Non-Goals:**
@@ -34,71 +52,163 @@ See proposal.md for motivation and specs/deploy-leases/spec.md and specs/mesh-ne
 
 ## Decisions
 
-### D1. Lease set = resolved mutation set
-`DeployMutationTargets` is rewritten to take the environment's server list and the resolved plan:
+### D1. Non-enrolled edge, builder and image-source candidates are environment members (PR1)
+In a config without enrolled servers, the following are the environment's schedulable members (`ResolveSchedulableEnvironmentTargets(GetEnvironmentServers(env))`):
+- the edge candidates (`ResolveEnvironmentProxyTargets`, already a subset);
+- the builder candidates;
+- the retained-image source candidates.
 
-- `assigned workers` ∪ `prior desired owners` ∪ `environment servers` (authority/alert fan-out, unchanged);
-- ∪ `ResolveEnvironmentProxyTargets(env)` when any service is proxied. This replaces "every edge in the file". Servers outside the environment appear only if the environment's `proxy` placement names them explicitly.
-- ∪ `selected builder`, when the build plan uses a remote builder. Builder selection runs before leasing and returns one node. Role-less servers are builder candidates only if they are environment members. Explicit `roles: [builder]` servers stay candidates project-wide, because an explicit role is a deliberate shared-builder designation.
-- ∪ `controller`, when enrolled (unchanged).
+One helper, `config.EnvironmentBuilderCandidates(cfg, env)`, implements the builder rule. It is used by:
+- `DeployLeaseTargets` and `DeployMutationTargets`, which also use environment proxy targets instead of every edge;
+- `placementApplyTargets`;
+- `Deployer.remoteBuilderServers` and therefore `locateRetainedImage`.
 
-`DeployLeaseTargets` callers get the same treatment. A table test pins the #114 configuration: the preview lease set is `{preview}`.
+Lease computation and deployer behavior therefore come from the same function, so no build or image export can reach an unleased node.
 
-*Alternative rejected:* keep the wide set and tolerate unreachable nodes outside the environment. A node that is leased but skipped is not protected, and a node that is not mutated does not need a lease. Precise scoping is both safer and simpler.
+Enrolled configs keep today's behavior: inventory roles, a cluster-wide builder list, and the single controller lease.
 
-### D2. Unreachable nodes
-`onUnreachableNode: block` keeps its all-or-nothing meaning over the scoped set. If a node outside the environment is in the set (explicit proxy target or selected builder) and is unreachable, the deploy fails as today. The error says why that node is in scope ("proxy target for environment preview" or "selected builder").
+Because environment servers are always in the deploy lease set (authority fan-out), the non-enrolled deploy lease set reduces to **environment servers ∪ configured prior desired owners**. A table test pins the #114 configuration: the preview lease set is `{preview}`, and no takod call is made to `production`.
 
-### D3. Node maintenance lease
-takod gains a second lease kind, `node`, stored at `<dataDir>/leases/_node.json` and gated by capability `lease.node-maintenance-v1`:
-- An environment lease acquisition fails with `LockedError` while a live node lease exists. A node lease acquisition fails while any live environment lease exists on the node, for any project.
-- Holders are `tako upgrade`, server setup/provision, `state forget-node`/repair operations that rewrite node-global files, and a future mesh re-key.
-- Fallback for agents without the capability: acquire the environment lease for every `(project, env)` in the current config whose servers include the node. This is weaker, since other projects are not covered, and Tako prints a warning recommending a takod upgrade. `tako upgrade` of takod itself necessarily runs against an older agent, so the fallback is the normal path for the first upgrade.
+*Alternative rejected:* keep the wide set and tolerate unreachable nodes outside the environment. A leased-but-skipped node is unprotected, and a node that is not mutated does not need a lease.
 
-This keeps two environments that share a server safe from node-wide mutation even though environment leases on that node do not conflict with each other. They never did (`lease.go:337-342`), and their mutable state is disjoint per `(project, env)`. The node-global resources they share are the WireGuard interface (made union-safe by D5), the merged Caddyfile (already per-`(project, env)` files, serialized by takod's render mutex) and the Docker daemon.
+### D2. Unreachable nodes and error reasons (PR1)
+`onUnreachableNode: block` keeps its all-or-nothing meaning over the scoped set. The only nodes outside the environment that can be in the set are prior desired owners. Their lease or connectivity error says why the node is in scope, for example `node old-1 holds prior desired assignments for environment preview`. This lets the operator see that the node must be reachable to stop the old containers, or that `tako remove --server old-1` comes first.
 
-### D4. Mesh topology: per-environment membership, per-node interface
+### D3. Pruned prior owners fail closed (PR1)
+v0.14.2 prunes out-of-scope servers with unset variables, and `AddPriorDesiredMutationTargets` skips assignments whose node is not in `cfg.Servers`. Without a guard, a server that left the environment's list but still runs its containers would silently be neither leased nor cleaned.
+- `#120` gains `Config.ScopedOutServers() map[string][]string` (server name → unset variables).
+- `AddPriorDesiredMutationTargets` returns an invalid-request error (exit 2) before any lease is taken when a prior owner is scoped out. Example: `server old-1 holds prior desired assignments for preview but was not loaded because ${OLD_1_HOST} is unset; export it and retry`.
+- A prior owner that is absent from `servers:` entirely keeps today's behavior: skipped, with the retired-server warning from local state.
+
+No other #114 computation reads servers outside the environment scope, so pruning cannot otherwise change lease sets or mesh addresses (D5).
+
+### D4. Mesh membership and apply scope (PR2)
+- **Peer list:** every mesh apply for an environment lists all of its schedulable members, sorted by name, whatever subset the operation mutates. Membership was already per environment and stays that way. Nodes that belong only to different environments are never peers.
+- **Apply targets:** deploy, rollback, project rollback, scale and promote send `PUT /v1/metadata` and `POST /v1/mesh/apply` to every member. In non-enrolled mode they already lease and contact every member (`deploy.go:265,415`, `rollback.go:165`, `scale.go:477-481`, `promote.go:100-136`), so this adds no connectivity requirement.
+  - Workload scope (`SetTargetServers`) stays separate from mesh scope. A deploy whose workloads touch a subset still reconciles workloads on that subset only.
+- **`tako run`:** it only runs `verifyTakodAgents`. It never writes node metadata or mesh config. Today it rebuilds a one-node mesh, which on a multi-node environment renumbers the node and removes all of its peers. A fresh node that never received a deploy behaves as it effectively does today: it has no usable mesh until the first deploy.
+- **Enrolled nodes:** unchanged. The platform owns their mesh, so app mesh apply is skipped (`takod_deploy.go:1508-1515`), and the resolver returns the platform `MeshIP`.
+
+### D5. Stable address resolution (PR2, CLI only)
+Inputs are the `GET /v1/status` results for every member, which `verifyTakodAgents` already fetches:
+- each member's `node.mesh.address` (its *recorded* address);
+- each member's `peers.peers[].address` (addresses in use on its interface).
+
+Resolution, in one pure function `resolveMeshAddresses(cidr, members, records)`:
+
+1. Process members in sorted name order. A member with a platform `MeshIP` (enrolled) uses it.
+2. A member keeps its recorded address if the address parses, lies inside `mesh.networkCIDR`, and has not already been taken by an earlier member in this pass. A later member that records the same address loses it. This deterministically repairs duplicates left by today's churn and emits one warning naming the members.
+3. Every remaining member gets the lowest host address of `mesh.networkCIDR` above the network address that is not in the *used* set: kept addresses, plus all addresses in members' recorded peer lists that belong to keys outside this membership.
+4. A member whose resolved address differs from its record is applied in the same operation (D4 applies to all members).
+
+Properties:
+- On a fresh environment the result equals today's deploy (`.1, .2, …` in sorted order). Existing nodes keep their recorded addresses, so nothing is renumbered on upgrade.
+- The result does not depend on the operation's target list, declaration order, or servers outside the environment. That makes it immune to v0.14.2 pruning.
+- On a shared node, both environments read the same recorded address for that node, so they agree on it.
+- An address that another environment or project uses on a shared member is avoided, because it appears in that member's recorded peers.
+
+`meshAddress(i)` and `cmd/domain_hosts.go:meshHostIPs` are deleted. Proxy upstream IPs come from the operation's resolved map. `tako domains hosts --address mesh` (and `auto` without `privateHost`) reads `GET /v1/status` from the proxy nodes and fails for an unreachable node instead of guessing.
+
+The deploy warns once per node when a member's recorded `node.project`/`node.environment` differs from the deploying `(project, env)`, while the node lacks `mesh.peer-sets-v1`: `server s is shared with app/production; its mesh peers are replaced by whichever deploy runs last until takod is upgraded`.
+
+*Alternative rejected:* hash-of-name allocation with linear probing over all configured servers (the earlier draft). Probing depends on which servers are present, which changes with v0.14.2 pruning and with servers added later. It still needs a recorded-address step to stay stable, and it can collide across projects.
+
+### D6. Node maintenance lease (PR3)
+takod gains a second lease kind, gated by capability `lease.node-maintenance-v1`:
+- **Storage:** `<dataDir>/node-leases/maintenance.json`, outside `leases/` so no project or environment name can collide with it. The format is versioned and frozen, because a new takod must read a lease written before its own restart.
+- **Mutual exclusion:** acquiring an environment lease fails with `LockedError` while a live maintenance lease exists. Acquiring the maintenance lease fails immediately, with exit 3, while any live environment lease of any project exists on the node; the error lists the holders. Both checks and writes run under one takod lease mutex.
+- **Holders:**
+  - `tako upgrade servers` for non-enrolled nodes. Enrolled upgrades keep the cluster upgrade coordinator.
+  - `tako setup` when converging a node whose takod answers.
+
+  `state forget-node` and `state repair` are **not** holders. They write `(project, env)` state and already take environment leases (`cmd/state.go:1190`).
+- **Scope per node, just in time:** the lease is acquired immediately before that node's mutation and released after verification, against the restarted agent. It uses a 15-minute TTL and no background renewal, because the agent restarts mid-operation. If the release fails, the lease expires on its own.
+- **Older agent (capability absent):** the operation acquires the *selected environment's* lease on that node for the same window, and warns that other environments and projects on the node are not fenced. The first upgrade necessarily takes this path.
+  - This deviates from the project's "fail closed on missing capability" rule. Failing would make the fixing upgrade impossible, and today's behavior is no lease at all.
+  - Enumerating "every environment in the config" was rejected: v0.14.2 prunes other environments, so the list would be silently incomplete.
+- **Downgrade:** an older takod ignores `node-leases/`. The stale file expires by TTL.
+
+Environment leases on a shared node do not conflict with each other (`lease.go:337-342`), and their mutable state is disjoint per `(project, env)`. The node-global resources they share are:
+- the WireGuard interface (made union-safe by D7);
+- the merged Caddyfile (per-`(project, env)` route files, serialized by takod's render mutex);
+- the Docker daemon.
+
+### D7. Shared-node peer sets (PR4)
 Options considered:
-1. **Project mesh, tolerate unreachable peers.** Rejected. Preview nodes would peer with production nodes (no isolation), every deploy would still contact every node for keys, and "tolerate" would silently drop peers.
-2. **Separate interface and CIDR per environment.** Rejected. It needs N interfaces and ports on shared servers, routing overlap, and a firewall rule per interface. It is heavy for little gain.
-3. **Chosen: membership per `(project, env)`, one interface per node, union on shared nodes.** A preview-only node's `AllowedIPs` lists only preview peers, so it cannot reach production-only nodes. A shared server peers with both, which is inherent to sharing a host.
+1. **A project mesh that tolerates unreachable peers.** Rejected. Preview nodes would peer with production nodes, and peers would be dropped silently.
+2. **Separate interface and CIDR per environment.** Rejected. It needs N interfaces and ports per shared server, plus routing overlap and firewall rules.
+3. **Chosen: one interface per node, one peer set per `(project, env)`, union render.**
 
-The deployer sends `PUT /v1/metadata` with a peer set keyed by `(project, env)`. takod stores `mesh/peer-sets/<project>/<env>.json` and renders WireGuard from the union of all sets (deduplicated by public key). Destroying an environment removes its set (`destroy` already leases the environment's nodes). The mesh step contacts only setup targets, which is unchanged and already environment-scoped.
-
-### D5. Stable, conflict-checked addressing
-Address resolution for each peer:
-1. A pinned address: the platform `MeshIP`, or a new optional `servers.<name>.meshIP` (validated inside `mesh.networkCIDR`, unique across servers).
-2. Otherwise the address recorded on the node. It is returned by the existing key-fetch call (`ensureTakodMeshKeys`), which already contacts each member.
-3. Otherwise a deterministic allocation:
-   - Sort all `cfg.Servers` names; collect pinned and recorded addresses known for this operation.
-   - For each unpinned name in order, take `hash(name) mod hostSpace`, then probe linearly to the first free host.
-   - The computation is config-only, so preview and production agree on addresses without contacting each other.
-
-Positional `meshAddress(i)` is removed. takod validates the union before applying it: one address held by two public keys (or one key holding two addresses) is rejected, and the error names both `(project, env, server)` entries and suggests `meshIP`. Nothing is applied.
-
-### D6. Migration
-- **takod side:** on startup, or on the first `mesh.peer-sets-v1` request, an existing `mesh/peers.json` becomes `peer-sets/<Project>/<Environment>.json` using its tags. If the tags are missing, it becomes a `_legacy` set that is kept until the next metadata write from any environment containing that node replaces it. The node's current address is recorded in `node.json`, so step 2 of D5 preserves it.
-- **CLI side:** if any target node lacks `mesh.peer-sets-v1`, the old single-file path is used. If the node is shared by several environments of the config, Tako emits a warning that the last deploy wins until takod is upgraded.
-- Existing two-environment meshes on shared servers may already have colliding positional addresses. The D5 conflict check surfaces them on the first deploy after upgrade, with the fix (`meshIP` or redeploy order) in the message. `tako doctor` reports the same check read-only.
+takod with `mesh.peer-sets-v1`:
+- **New request:** `PUT /v1/mesh/peer-sets` carries `{project, environment, config, node, peers}`. takod validates it, stores `mesh/peer-sets/<project>/<env>.json`, and renders the union, all under one mutex. A rejected union stores nothing and leaves the interface unchanged.
+- **Union rules:**
+  - Peers are deduplicated by public key.
+  - One address held by two keys, or one key holding two addresses, is a conflict.
+  - Sets that have peers other than the node itself must agree on `networkCIDR`, `subnetBits`, `listenPort`, and the node's own address.
+  - Sets with no other peers (single-node environments) add no peers and impose no interface settings. This keeps today's co-location of unrelated single-node projects working even when their `mesh:` blocks differ. When no set has peers, the most recent set's settings apply, as today.
+  - A conflict error names both `(project, env, server)` entries and suggests redeploying the environment that owns the stale address.
+- **Removal:** `DELETE /v1/mesh/peer-sets/<project>/<env>` removes a set and re-renders. `tako destroy` calls it on environment members that advertise the capability.
+- **Status:** `GET /v1/status` adds `meshPeerSets` (per set: project, environment, peers). The D5 used-set reads it when present, instead of `peers`.
+- **Migration:**
+  - On first use, takod converts an existing `mesh/peers.json` into the set named by its `project`/`environment` tags. The deployer has always written those tags (`takodMeshDesiredState`).
+  - An untagged file becomes `_legacy`, which is dropped on the next peer-set write.
+- **Old CLI → new takod:** the legacy `PUT /v1/metadata` still writes `node.json`/`peers.json`. The following legacy `POST /v1/mesh/apply` is keyed by the tags of that just-written `peers.json`, stored as that set, and rendered as the union under the same conflict check.
+- **New CLI → old takod:** the legacy path, plus the D5 shared-node warning. This is today's behavior, not a new feature request, so it does not fail closed.
 
 ## Risks / Trade-offs
 
-- **[Under-leasing: a mutated node is missing from the set]** → Mitigation: lease computation and mutation must come from the same resolved plan. A test hooks the deployer's node-call recorder and asserts every node receiving a mutating takod request was leased (applied to deploy, rollback, scale, promote).
-- **[Builder selection moves before leasing]** → It is a pure function of config and node labels. If it needs reachability probes, the probe is limited to candidates in scope.
-- **[Node lease starvation: continuous deploys block upgrade]** → The node lease waits up to the existing acquire timeout (TTL/4) and then fails with the holder's details. Upgrade is an operator action and can be retried.
-- **[Hash allocation collisions on small CIDRs]** → Linear probing is deterministic. The /24 default holds 254 nodes, and validation rejects configs with more servers than host space.
-- **[Hash probing is order-dependent: a newly added server can claim the home slot of a not-yet-recorded server]** → Recorded addresses (D5 step 2) win once a node has joined any mesh, the takod union conflict check fails closed on any disagreement, and `meshIP` pins remove the ambiguity entirely.
-- **[Mixed takod versions]** → Capability fallbacks (D3, D6) keep today's behavior with explicit warnings rather than failing.
+- **[Under-leasing: a mutated node is missing from the lease set]** → D1 derives leases and deployer candidates from one helper. The "mutated implies leased" harness records every mutating takod call (deploy, run, rollback, project rollback, scale, promote) and asserts its node was leased.
+- **[Builds move into the environment]** → Builds and image exports now always run on environment members. That is the intended fix: a staging build no longer loads a production server. Each environment contains its own targets, so every target platform still has a builder.
+- **[Mesh apply now reaches every member on deploys with subset workloads]** → Those members are already leased and contacted, and an unchanged config re-applies idempotently.
+- **[A recorded address is wrong because of today's churn]** → D5 step 2 repairs duplicates deterministically, and every member whose address changed is re-applied in the same operation.
+- **[Concurrent first deploys of two environments that share an unrecorded server]** → They may choose different addresses. Before PR4, the last writer wins and the next deploy reads the record. After PR4, the union check rejects the second one, which succeeds on retry.
+- **[Node lease starvation by continuous deploys]** → Acquisition fails fast with the holders listed. Upgrade is an operator action and can be retried.
+- **[Mixed takod versions]** → PR1 and PR2 need no takod change. PR3 and PR4 keep today's behavior with explicit warnings on old agents.
+- **[`tako domains hosts --address mesh` now needs connectivity]** → It previously printed positional guesses that could be wrong, so correctness wins. `--address private|ssh` stay offline.
 
 ## Migration Plan
 
-Upgrade the CLI first. Leases are scoped immediately (CLI-only). Then run `tako upgrade` for takod. The first deploy per environment after that migrates mesh files in place (D6). No config edits are required. `meshIP` is needed only if the conflict check reports an existing collision. Rollback: an older CLI writes the legacy single file, which a new takod treats as a full replacement of that environment's set. This is safe but loses the union until the new CLI deploys again.
+- **PR1 and PR2 (CLI only):** behavior changes immediately. Addresses stay as recorded, and duplicate addresses are repaired with a warning on the first full-membership operation.
+- **PR3 and PR4:** run `tako upgrade servers` once; the first run uses the D6 fallback. The first deploy of each environment after that writes its peer set, and the legacy file is migrated in place.
+- **No config edits.**
+- **Rollback to an older CLI:**
+  - it writes the legacy file, which a new takod keys by tags and unions (D7);
+  - it goes back to positional addressing, which can renumber again. That is the old bug, not a new failure mode.
 
-## Open Questions
+## Implementation order
 
-1. **Split the mesh per environment, or keep a project mesh?** Recommended: split membership per `(project, env)` with a per-node interface union (D4). It gives isolation without extra interfaces.
-2. **Should explicit `roles: [builder]`/`[edge]` servers outside the environment still be candidates?** Recommended: builders yes, because an explicit role is deliberate sharing. Edges only through the environment's `proxy` placement.
-3. **Add a user-facing `servers.<name>.meshIP`?** Recommended: yes, optional. It is the escape hatch for conflicts found by D5. The default stays automatic.
-4. **Should the node maintenance lease also cover `tako cleanup`/`backup`?** Recommended: no. They operate on `(project, env)` resources and keep the environment lease. Only node-global writers take the node lease.
-5. **Ship leases and mesh separately?** Recommended: yes, as two PRs. D1-D2 (CLI-only) fix #114's blocking error immediately. D3-D6 need takod capabilities and follow.
-6. **Reproduce the "both hosts end up in one mesh" symptom?** Current master already builds peers from environment setup targets (`deploy.go:395-408`). The symptom is most likely positional address overlap or the last-writer-wins `peers.json` on shared nodes, or pre-v0.14 behavior. Recommended: add the regression test in tasks 3.1 before changing code.
+1. **PR1: lease and builder scoping** (tasks 1.x). CLI only. Lands after #120 (v0.14.2), whose `servicesBuildImages` refactor of `takod.go` it builds on and whose environment-scope code gains `ScopedOutServers()`. Closes #114's reported error.
+2. **PR2: stable mesh addressing** (tasks 2.x). CLI only. Independent of PR1 but reviewed after it, because both touch `deploy.go:390-421`.
+3. **PR3: node maintenance lease** (tasks 3.x). takod and CLI, behind `lease.node-maintenance-v1`.
+4. **PR4: shared-node peer sets** (tasks 4.x). takod and CLI, behind `mesh.peer-sets-v1`. It depends on PR2's resolver.
+5. **Docs** ship with each PR for its own section (tasks 1.8, 2.7, 3.3 and 4.5). The troubleshooting entry ships with PR1.
+
+## Resolved Questions
+
+1. **Split the mesh per environment, or keep a project mesh?**
+   - **Decision:** membership stays per environment, which is already true on master since before v0.10.0. A per-node union of `(project, env)` peer sets for shared nodes ships last (PR4, D7).
+   - **Rationale:** no code path peers nodes of different environments. The real defects are address churn and last-writer-wins on shared nodes, so the plan fixes those instead of redesigning membership.
+2. **Should explicit `roles: [builder]`/`[edge]` servers outside the environment stay candidates?**
+   - **Decision:** the question does not arise in non-enrolled configs. `roles` cannot be written in `tako.yaml` (`yaml:"-"`), and proxy placement outside the environment is already rejected (`placement.go:120-139`). Non-enrolled candidates are environment members (D1), and enrolled mode is unchanged.
+   - **Rationale:** the earlier spec scenarios for an explicit builder or proxy target outside the environment described impossible configs, so they were removed.
+3. **Add a user-facing `servers.<name>.meshIP`?**
+   - **Decision:** no, not in this change.
+   - **Rationale:** recorded addresses are a durable pin, and allocation avoids every address visible on members. A new key would also overlap the platform-owned `MeshIP` field. It can be added later if conflict reports show a need.
+4. **Should the node maintenance lease also cover `tako cleanup`/`backup`?**
+   - **Decision:** no.
+   - **Rationale:** they operate on `(project, env)` resources and keep the environment lease. `state forget-node` and `state repair` are also removed from the holder list for the same reason.
+5. **Ship leases and mesh separately?**
+   - **Decision:** yes, as four PRs (see Implementation order).
+   - **Rationale:** PR1 is CLI-only and fixes the reported error. PR2 is CLI-only and fixes the churn. Only PR3 and PR4 need takod capabilities.
+6. **Can the "both hosts end up in one mesh" symptom be reproduced?**
+   - **Decision:** not as peering. Positional addressing gives both single-node environments the same `.1` address on the same interface, which looks like one mesh. PR2's regression tests pin the real churn defects instead (`run` renumbering, declaration-order swaps, subset deploys).
+   - **Rationale:** setup targets have been intersected with environment servers since 18f8a67, which is an ancestor of v0.10.0 through v0.14.1.
+7. **How does v0.14.2 environment scoping interact with this change?**
+   - **Decision:** lease sets, builder candidates and mesh membership read only environment members, which are always in scope. A prior desired owner that was pruned fails closed (D3), and allocation never reads servers outside the environment (D5).
+   - **Rationale:** a pruned server must never be silently skipped when it is needed, and addresses must not depend on which variables are exported.
+8. **What should the fallback be for older agents without the node maintenance lease?**
+   - **Decision:** take the selected environment's lease on that node and warn (D6).
+   - **Rationale:** with pruning, the config's environment list is not reliable, and the first upgrade must still work.
+9. **Should `tako run` keep preparing the mesh?**
+   - **Decision:** no. It only verifies the agent (D4).
+   - **Rationale:** it contacts one server, so it cannot build a correct environment-wide peer list, and today it actively breaks the node's mesh.
