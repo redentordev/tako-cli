@@ -2038,6 +2038,101 @@ Node-local alert delivery cannot detect that its own node is down. Run
 `tako_scheduler_alert_owner_reachable == 0`, active episodes, or exhausted
 deliveries.
 
+## Health Monitoring Alerts
+
+takod also checks service health and node, container and certificate
+conditions (`monitoring.health-v1`). It sends alerts to the same targets:
+
+<!-- tako:snippet partial -->
+```yaml
+notifications:
+  slack: ${SLACK_WEBHOOK_URL}
+  alerts:
+    services:
+      alertAfter: 3
+      recoverAfter: 2
+    host:
+      disk: 90
+      inodes: 90
+      memory: 90
+      cpu: 95
+      cpuFor: 10m
+      load: 4
+      conditions: true
+    containers:
+      oom: true
+      crashLoop: 3
+      crashLoopWindow: 10m
+    certificates:
+      warnBefore: 336h
+      criticalBefore: 72h
+environments:
+  production:
+    services:
+      web:
+        image: nginx:1.27
+        port: 80
+        proxy:
+          domain: www.example.com
+        monitoring:
+          enabled: true
+          interval: 30s
+          timeout: 5s
+          alertAfter: 2
+          checkType: http
+          webhook: https://hooks.example.com/tako/web
+```
+
+Defaults apply whenever an `alerts` block exists, even when these sections
+are omitted:
+
+| Setting | Default |
+|---|---|
+| `services.alertAfter` / `recoverAfter` | 3 / 2 |
+| `host.disk` / `host.inodes` | 90% (critical at 95%) |
+| `host.memory`, `host.cpu`, `host.load` | off |
+| `host.conditions` | on |
+| `containers.oom` | on |
+| `containers.crashLoop` | 3 restarts in 10m |
+| `certificates.warnBefore` / `criticalBefore` | 336h / 72h |
+
+To disable a threshold, set it to `0`. Percentages range from 1 to 99.
+
+`host` and `certificates` subjects belong to the whole node. They require a
+shared target (`slack`, `discord` or `webhook`), and each target is alerted
+once per node, even when several projects share it.
+
+Per-service settings:
+
+- `monitoring.interval`: 10s to 1h, default 60s. An out-of-range value from
+  an older config produces a warning and is clamped.
+- `monitoring.timeout`: 1s to 60s, shorter than the interval, default 10s.
+- `monitoring.alertAfter` / `recoverAfter`: override the service defaults.
+- `monitoring.webhook`: an extra public HTTPS target that receives only that
+  service's alerts. A value that fails alert target validation was accepted
+  by earlier releases. It now produces a deprecation warning and is never
+  sent.
+- `monitoring` on job and run services is ignored.
+
+`http` checks run on the node that serves the proxy route (the first
+schedulable proxy server). takod dials its local proxy using the service
+domain and checks the health check path, the status code, and the
+certificate's hostname and validity. A service with no routable domain falls
+back to a `container` check, with a warning. Container checks compare
+running replicas on each node that has assignments.
+
+Checks report `unknown` until the service is deployed. They are paused
+while a deploy holds the lease, for `max(startPeriod, 30s)` after a deploy,
+during maintenance mode, and while removal is pending.
+
+On nodes without `monitoring.health-v1`, deploy prints "node-side monitoring
+inactive on <node>; run tako upgrade servers" and continues. Deploy fails
+with exit code 2 only when the new keys (`alerts.services`, `host`,
+`containers`, `certificates`, or `monitoring.timeout`, `alertAfter`,
+`recoverAfter`) are set explicitly. Read state with `tako monitor`. The
+payload schema, flap control and Prometheus series are described in
+[Resource Monitoring](RESOURCE-MONITORING.md#4-alerting).
+
 ## Operator Files
 
 `files:` distributes local regular files or whole directories to the node and

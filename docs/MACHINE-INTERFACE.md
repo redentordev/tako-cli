@@ -641,7 +641,71 @@ represented as a node-down event; only the external observer emits reachability
 `0` when it cannot read that owner. `owner_present` is `0` when no environment
 member is currently schedulable; system and container metrics are still
 collected from the configured nodes. All nodes failing exits 1, a partial read
-exits 6, both still emit the document. `tako stats --output json`
+exits 6, both still emit the document.
+
+On nodes advertising `monitoring.health-v1`, the `/v1/alerts` response has
+an additive `sources` object. It contains `evaluatedAt`, `subjects` (`kind`,
+`subject`, `node`, `state`, `severity`, `reasons`, `since`,
+`lastObservedAt`, `details`, `paused`, `flapping`), bounded `deliveries`,
+`pendingDeliveries` and `exhaustedDeliveries`. `PUT /v1/alerts` additively
+accepts `monitors`, `host`, `containers`, `certificates` and
+`serviceTargets` (per-service webhook targets, never returned).
+
+`tako monitor --output json` reads that status from every environment node
+in parallel (10s per node) and returns a `MonitorResult`. The document has
+`project`, `environment`, the optional `service` filter, and `status`
+(`ok`, `attention`, `unreachable` or `unsupported`). `counts` gives `ok`,
+`alerting`, `paused` and `unknown`. `nodes` has per-node `node`,
+`reachable`, `supported`, optional `error`, `subjects` (`kind`, `subject`,
+`state`, `severity`, `reasons`, `since`, `lastCheckedAt`, `details`),
+`pendingDeliveries` and `exhaustedDeliveries`. `notDeployed` lists
+monitored services that no node reports.
+
+Exit codes for `tako monitor --output json`:
+
+- 0: everything is ok.
+- 6: any subject is alerting or flapping, a service is not deployed, or a
+  node could not be read.
+- 4: every node is unreachable.
+- 2: no node advertises `monitoring.health-v1`.
+
+In every case the document is still emitted. `--watch` and `--local` are
+human-only and rejected in machine modes. `tako prometheus` adds:
+
+- `tako_monitor_subject_active{project,environment,node,kind,subject,severity}`
+- `tako_monitor_subject_last_observed_timestamp_seconds`
+- `tako_monitor_pending_deliveries{project,environment,node}`
+- `tako_monitor_exhausted_deliveries{project,environment,node}`
+- `tako_host_metrics_stale{node}`
+
+Alert webhooks use payload schema v1 (`schemaVersion: 1`) for every kind,
+including jobs and backups. The payload contains:
+
+- `eventId` and `episodeId` (stable across retries).
+- `transition`: `opening`, `recovery`, `escalation`, `event` or
+  `suppressed`.
+- `event`, `project`, `environment`, `node` (`external` for
+  `tako monitor --local`), `kind`, `subject` (`service` is an alias),
+  `severity` (`warning` or `critical`).
+- `reasons`, `details` (string values only), `openedAt`, `message` and
+  `timestamp`.
+
+Values are closed-vocabulary codes, public names and numbers. Subjects that
+are not service names start with `@`. Slack and Discord receive only
+`message`. The kinds are:
+
+| Kind | Scope | Subjects | Reasons | Opening / recovery events |
+|---|---|---|---|---|
+| `service` | scope | service | `unreachable`, `unhealthy_status`, `tls_invalid`, `replicas_missing`, `unhealthy` | `service_down`, `health_check_failed` / `service_up`, `health_check_recovered` |
+| `host` | node | `root`, `docker` | `disk_high`, `inodes_high`, `memory_high`, `cpu_high`, `load_high`, `metrics_stale` | `high_disk`, `high_inodes`, `high_memory`, `high_cpu`, `high_load`, `metrics_stale` / `resource_normal` |
+| `container` | scope | service | `crash_loop` (level), `oom` (event) | `container_crash_loop` / `container_recovered`; `container_oom` |
+| `certificate` | scope | domain | `cert_expiring`, `cert_expired` | `ssl_expiring_soon`, `ssl_expired` / `ssl_renewed` |
+| `selfheal`, `hygiene`, `node` | reserved | | registered by later changes | |
+
+Per-service webhooks receive only `service` and `container` subjects (and
+later `selfheal` subjects) of their own service.
+
+`tako stats --output json`
 (point-in-time; `--live` is rejected
 in machine modes) returns a `StatsResult` with project/environment, the
 `--service`/`--all` filters, `collectedAt`, and per-node samples whose
@@ -843,10 +907,10 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `monitor` (`--watch`/`--local` human-only), `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), project `rollback` (`deploy.service.*`, including `deploy.service.skipped`), lifecycle hooks in `deploy\|rollback\|promote\|setup` (`hook.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
-| Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
+| Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
 | Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, hidden `platform node upgrade-publication-guard`, and hidden internal E2E helpers |
 
 Human-only commands reject `--output json` and `--events ndjson` with a

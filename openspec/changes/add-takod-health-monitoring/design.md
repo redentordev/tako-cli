@@ -405,3 +405,34 @@ This change owns the alert vocabulary and routing for all four ops-automation ch
 7. **v1 keys on job and backup payloads?** **Yes, additively**, and the job and backup `message` text stays byte-identical. *Rationale: one schema for consumers with no change to existing keys or text.*
 8. **Separate `critical` delivery for certificates?** **Yes, one `escalation`.** *Rationale: "3 days left" deserves a second notice.*
 9. **Existing invalid `monitoring.webhook` values?** **Warning for one deprecation cycle; never sent to takod or used by `--local`.** *Rationale: SSRF safety without failing config loads that worked yesterday.*
+
+## Implementation notes
+
+Where the plan and the code disagreed, the implementation took the safest equivalent:
+
+- **Per-service targets:** they travel as a request-level `serviceTargets` map, not as `Targets.Services`. `AlertTargets` must stay comparable, because the legacy manager compares target generations with `==`.
+- **Source API extensions (additive):**
+  - `LevelObservation` gains `Severities`, `Hold`/`HoldReason` (paused, maintenance, unknown) and `Interval` (staleness).
+  - `EventObservation` gains `Severity` and `Cooldown`.
+  - `SourceAlertManager` adds `Retire`, `Subjects`, `AnySubscribed`, `ScopePolicies` and `Configured` for source bookkeeping.
+  - `Damping.OpenFor` is ANDed with `OpenAfter`.
+- **Ledger key:** `(kind, subject, targetFingerprint)` per episode, rather than the 5-tuple. Escalation and recovery follow the episode that owns the key, so a suppressed opening suppresses both. Events dedupe on `subject#reason` with their cooldown.
+- **Loading and persistence:**
+  - A scope whose files fail to load is skipped with a warning; it never stops takod.
+  - Subjects of kinds that are not registered are dropped on load.
+  - A failed write keeps state in memory and retries on the next flush.
+  - Credential file mode checks are skipped on Windows (development only).
+- **Host evaluator:** `cpuFor` is tracked in the evaluator, which reports `cpu_high` only after the threshold has held for that long. The status `reasons` list shows the current reasons only.
+- **Checker node:** the first schedulable server in sorted order among the environment's proxy servers (`GetEnvironmentProxyServers`), which is where routes are written. Otherwise the first schedulable server.
+- **Http monitors without a routable domain:** they fall back to a container check, with a deploy warning.
+- **Container check:**
+  - "Running" uses the active containers and falls back to all containers.
+  - When every service in the revision has no assignments, the expected count is the replica count.
+- **Config:**
+  - An out-of-range legacy `monitoring.interval` is a warning and is clamped.
+  - `monitoring` on job and run services is skipped rather than rejected.
+- **`tako monitor --local`:**
+  - `--once` is stateless and sends an opening for every failure, matching its old behavior.
+  - Delivery goes to the deliverable per-service webhook, otherwise to the validated notification targets. The node is reported as `external`.
+- **`MonitorResult`:** adds `notDeployed`, plus per-node `supported` and `error` fields.
+- **Verification gaps:** WSL was unavailable during implementation, so verification ran on Windows. Tests that are Linux-only, such as `syscall.Stat_t` in takod's `service_files_test.go`, were type-checked with `GOOS=linux go vet`. `openspec validate --strict` ran with the Windows CLI. The live-server check (task 6.3) was not run.

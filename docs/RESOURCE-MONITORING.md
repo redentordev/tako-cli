@@ -301,17 +301,81 @@ done
 
 ### 4. Alerting
 
-Create alerts based on thresholds:
+takod checks health and sends alerts from each node, so alerts keep working
+when your laptop is off. Nodes need the `monitoring.health-v1` capability
+(`tako upgrade servers`). Deploy pushes the policy from tako.yaml:
+
+```yaml
+notifications:
+  slack: ${SLACK_WEBHOOK_URL}
+  alerts:
+    services: { alertAfter: 3, recoverAfter: 2 }   # damping defaults
+    host: { disk: 90, inodes: 90, memory: 90, cpu: 95, cpuFor: 10m, load: 4 }
+    containers: { oom: true, crashLoop: 3, crashLoopWindow: 10m }
+    certificates: { warnBefore: 336h, criticalBefore: 72h }
+
+services:
+  web:
+    monitoring:
+      enabled: true
+      interval: 30s     # 10s..1h, default 60s
+      timeout: 5s       # 1s..60s, shorter than interval
+      webhook: https://hooks.example.com/web   # optional extra target for this service only
+```
+
+How it works:
+
+- **Services**: `http` checks run on the node that serves the proxy route.
+  They dial the local proxy with the service's domain, check the
+  health path, and verify the certificate's hostname and validity. A
+  `container` check runs on every node that has replicas. Checks are
+  paused during deploys and for the start period after a deploy, and while
+  maintenance mode is on.
+- **Host**: disk and inode usage per filesystem, memory, sustained CPU, and
+  load per core, taken from the node's metrics sample. If the sample is
+  older than 5 minutes, the node raises `metrics_stale`.
+- **Containers**: OOM kills are one-off events (one alert per 15 minutes,
+  with a repeat count). Crash loops open an episode and recover after two
+  quiet windows.
+- **Certificates**: routed domains are scanned every 6 hours, starting 2
+  minutes after takod starts.
+
+Damping, escalation and flap control apply to every subject. An episode
+opens after `alertAfter` failed checks and recovers after `recoverAfter`
+passing checks. A rise in severity sends an escalation. A subject that
+changes state more than 6 times in an hour sends one `suppressed` alert,
+then stays silent until it has been stable for 30 minutes. Node-wide
+subjects (host and certificates) alert once per target, even when several
+projects share the node.
+
+Every alert uses webhook payload schema v1 (`schemaVersion: 1`). It carries
+`eventId`, `episodeId`, `transition` (opening, recovery, escalation, event,
+suppressed), `event`, `project`, `environment`, `node`, `kind`, `subject`
+(`service` is an alias), `severity`, `reasons`, `details`, `openedAt`,
+`message` and `timestamp`. Payloads contain only codes, public names and
+numbers. They never include response bodies, error text, headers or
+environment values. Slack and Discord receive only `message`.
+
+Use `tako monitor` to read the state:
 
 ```bash
-#!/bin/bash
-# Check if CPU > 90%
-CPU=$(tako metrics --once | grep "CPU:" | awk '{print $2}' | sed 's/%//')
-if (( $(echo "$CPU > 90" | bc -l) )); then
-  echo "ALERT: High CPU usage: $CPU%"
-  # Send notification (email, Slack, etc.)
-fi
+tako monitor                  # KIND SUBJECT NODE STATE SEVERITY SINCE LAST CHECK REASONS
+tako monitor --service web
+tako monitor --watch          # refresh every 5s
+tako monitor --output json    # MonitorResult; exit 6 when anything needs attention
+tako monitor --local          # legacy outside checker running on this machine (node "external")
 ```
+
+`tako prometheus` exports the following series:
+
+- `tako_monitor_subject_active{project,environment,node,kind,subject,severity}`
+- `tako_monitor_subject_last_observed_timestamp_seconds`
+- `tako_monitor_pending_deliveries{project,environment,node}`
+- `tako_monitor_exhausted_deliveries{project,environment,node}`
+- `tako_host_metrics_stale{node}`
+
+A `monitoring.webhook` that is not public HTTPS was accepted by earlier
+releases. Now it produces a deprecation warning and is never used.
 
 ---
 
@@ -380,7 +444,6 @@ tako prometheus | promtool check metrics
 Planned features:
 - [ ] Built-in HTTP server for Prometheus scraping
 - [ ] Metrics aggregation across multiple servers
-- [ ] Alerting rules and notifications
 - [ ] Metrics retention and historical queries
 - [ ] Grafana dashboard templates
 - [ ] Custom metric collection plugins
