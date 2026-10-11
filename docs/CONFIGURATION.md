@@ -1604,9 +1604,14 @@ status `rolled_back` (or `failed` after a partial rollback), so running
 Before changing anything, Tako checks that every image it needs is available:
 the exact image still retained on the environment's nodes (reused without a
 build), the target commit in the local git repository (rebuilt), or a registry
-image (pulled). `tako cleanup` keeps the newest images per service (`--keep`,
-default 3), so older targets of build-backed services usually need the
-commit to rebuild; shared-build images must still be retained. If any image is
+image (pulled). `tako cleanup` keeps the newest images per service and
+environment (`--keep`, default 3), so older targets of build-backed services
+usually need the commit to rebuild; shared-build images must still be retained.
+Cleanup only removes images the node's deployment history attributes to the
+cleaned environment alone. It never removes an image another environment's
+history references, an image in any current desired or actual state on the
+node, or an image a container still uses. If that state cannot be read, it
+removes no images. If any image is
 unavailable, the plan fails with exit 1 and nothing is changed. Finding
 retained images needs a node agent with the `image.descriptor-v1` capability;
 run `tako upgrade servers` if the plan asks for it.

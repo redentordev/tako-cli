@@ -1285,7 +1285,7 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	response, err := CleanupProject(r.Context(), request)
+	response, err := CleanupProjectWithDataDir(r.Context(), s.dataDir, request)
 	if err != nil {
 		if recoveredSchedulerDrain {
 			s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)

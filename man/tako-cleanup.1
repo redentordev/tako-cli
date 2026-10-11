@@ -14,8 +14,8 @@ Clean up app/stage runtime resources to reclaim disk space.
 
 .PP
 This command helps maintain your servers by:
-  - Removing old service images (keeps latest N)
   - Removing stopped service replicas
+  - Removing old service images (keeps latest N per service and environment)
   - Removing unused Tako project volumes
   - Securing log file permissions
 
@@ -27,6 +27,10 @@ deployment servers lean and efficient.
 Shared-node safety:
   - Default cleanup is scoped to the current project and environment
   - It does not remove unrelated project containers, volumes, proxy routes, or images
+  - Old images are removed only when the node's deployment history attributes
+    them to this environment alone; images referenced by another environment,
+    by any current deployment, or by any container are kept. If that state
+    cannot be read, no images are removed
   - Docker builder cache and dangling image cleanup are global Docker operations;
     use --docker-cache only when you intentionally want to reclaim shared cache
 
@@ -65,7 +69,7 @@ Examples:
 
 .PP
 \fB-k\fP, \fB--keep\fP=3
-	Number of latest images to keep per service
+	Number of latest images to keep per service and environment
 
 .PP
 \fB--secure\fP[=false]
