@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -277,6 +278,19 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 		// Desired state also carries the resolved image used by the completed
 		// run; config source remains imageFrom so the next plan can resolve it.
 		out.Image = ""
+	}
+	if policy := service.SelfHealing; policy != nil && policy.Enabled && !out.IsRun() && !out.IsJob() {
+		enabled, restartUnhealthy, startExited := true, policy.RestartUnhealthy, policy.StartExited
+		out.SelfHealing = &config.SelfHealingConfig{
+			Enabled:            &enabled,
+			RestartUnhealthy:   &restartUnhealthy,
+			StartExited:        &startExited,
+			UnhealthyThreshold: policy.UnhealthyThreshold,
+			MaxRestarts:        policy.MaxRestarts,
+		}
+		if policy.WindowSeconds > 0 {
+			out.SelfHealing.Window = (time.Duration(policy.WindowSeconds) * time.Second).String()
+		}
 	}
 	if out.IsRun() {
 		// Older desired documents may contain generic container defaults that

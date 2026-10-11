@@ -15,6 +15,41 @@
     }
   },
   "definitions": {
+    "selfHealing": {
+      "type": "object",
+      "description": "Opt-in node-local self-healing: takod restarts unhealthy containers and starts crashed ones it started earlier, on the same node only. Off by default. Persistent services ignore the environment-level enabled flag and need their own enabled: true. Never part of container identity.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Turn self-healing on (default false)"
+        },
+        "restartUnhealthy": {
+          "type": "boolean",
+          "description": "Restart a running container that stays unhealthy (default true)"
+        },
+        "startExited": {
+          "type": "boolean",
+          "description": "Start a container that exited with a non-zero code under restart: no or on-failure (default true)"
+        },
+        "unhealthyThreshold": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Consecutive unhealthy observations (spanning at least 60s) before a restart (default 3)"
+        },
+        "maxRestarts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Actions within window before the service gives up on the node (default 3)"
+        },
+        "window": {
+          "type": "string",
+          "description": "Give-up window, 5m to 24h (default 30m)"
+        }
+      }
+    },
     "secretSources": {
       "type": "array",
       "description": "External secret stores read live whenever Tako resolves secrets (deploy, exec, validate). Sources hold provider selectors only, never values. Later sources override earlier ones, and provider values override .tako/secrets files.",
@@ -641,6 +676,9 @@
           },
           "secretSources": {
             "$ref": "#/definitions/secretSources"
+          },
+          "selfHealing": {
+            "$ref": "#/definitions/selfHealing"
           },
           "serverSelector": {
             "type": "object",
@@ -1517,6 +1555,9 @@
                       "description": "Check type; auto-detected when omitted"
                     }
                   }
+                },
+                "selfHealing": {
+                  "$ref": "#/definitions/selfHealing"
                 },
                 "export": {
                   "type": "boolean",

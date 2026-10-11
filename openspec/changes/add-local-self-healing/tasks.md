@@ -4,12 +4,12 @@ Prerequisite: `add-takod-health-monitoring` has landed (shared container sampler
 
 ## 1. Config and desired state
 
-- [ ] 1.1 Add `SelfHealingConfig` (`enabled`, `restartUnhealthy`, `startExited`, `unhealthyThreshold`, `maxRestarts`, `window`) to `EnvironmentConfig` and `ServiceConfig` (`pkg/config/types.go`); verify strict decode rejects unknown keys in YAML and JSON
-- [ ] 1.2 Validation in `pkg/config/validator.go`: ranges (threshold 1-20, maxRestarts 1-20, window 5m-24h), reject on `kind: job`/`kind: run`; table tests
-- [ ] 1.3 Implement `EffectiveSelfHealing(env, service)` (D1: service → environment → defaults; environment `enabled` ignored for persistent services); table tests including persistent opt-in and `extends` inheritance
-- [ ] 1.4 Add `SelfHealing` to `takodstate.DesiredService` and `takoapi.DesiredServiceDocument`, filled by `sanitizeDesiredService` (`pkg/takodstate/state.go:806`) and omitted when disabled; verify round trip and omission
-- [ ] 1.5 Keep `selfHealing` out of `reconcile.SafeServiceConfigHash` and `deployplan.ServiceRevisionID`; add a test that toggling and tuning the block leaves both unchanged, and a deployer test that a selfHealing-only change plans no container update
-- [ ] 1.6 Add `selfHealing` to `schema/tako.schema.json` (environment and service) with schema tests
+- [x] 1.1 Add `SelfHealingConfig` (`enabled`, `restartUnhealthy`, `startExited`, `unhealthyThreshold`, `maxRestarts`, `window`) to `EnvironmentConfig` and `ServiceConfig` (`pkg/config/types.go`); verify strict decode rejects unknown keys in YAML and JSON
+- [x] 1.2 Validation in `pkg/config/validator.go`: ranges (threshold 1-20, maxRestarts 1-20, window 5m-24h), reject on `kind: job`/`kind: run`; table tests
+- [x] 1.3 Implement `EffectiveSelfHealing(env, service)` (D1: service → environment → defaults; environment `enabled` ignored for persistent services); table tests including persistent opt-in and `extends` inheritance
+- [x] 1.4 Add `SelfHealing` to `takodstate.DesiredService` and `takoapi.DesiredServiceDocument`, filled by `sanitizeDesiredService` (`pkg/takodstate/state.go:806`) and omitted when disabled; verify round trip and omission
+- [x] 1.5 Keep `selfHealing` out of `reconcile.SafeServiceConfigHash` and `deployplan.ServiceRevisionID`; add a test that toggling and tuning the block leaves both unchanged, and a deployer test that a selfHealing-only change plans no container update
+- [x] 1.6 Add `selfHealing` to `schema/tako.schema.json` (environment and service) with schema tests
 
 ## 2. takod: records, journal, control state
 

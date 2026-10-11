@@ -448,6 +448,10 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		return fmt.Errorf("environment %s: must specify either 'servers' or 'serverSelector'", envName)
 	}
 
+	if err := validateSelfHealingConfig("environment "+envName, env.SelfHealing); err != nil {
+		return err
+	}
+
 	// Validate server names exist in config
 	if len(env.Servers) > 0 {
 		for _, serverName := range env.Servers {
@@ -860,6 +864,14 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 
 	if err := validateServiceKind(name, service); err != nil {
 		return err
+	}
+	if service.SelfHealing != nil {
+		if service.IsJob() || service.IsRun() {
+			return fmt.Errorf("service %s: kind: %s cannot set selfHealing", name, service.Kind)
+		}
+		if err := validateSelfHealingConfig("service "+name, service.SelfHealing); err != nil {
+			return err
+		}
 	}
 	if err := validateStringOrList(name, "command", service.Command); err != nil {
 		return err

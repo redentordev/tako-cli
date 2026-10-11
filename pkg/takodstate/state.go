@@ -114,6 +114,8 @@ type DesiredService struct {
 	HealthCheck              config.HealthCheckConfig       `json:"healthCheck,omitempty"`
 	DeployStrategy           string                         `json:"deployStrategy,omitempty"`
 	RemovalPending           bool                           `json:"removalPending,omitempty"`
+	// SelfHealing is the resolved self-healing policy, omitted when disabled.
+	SelfHealing *takoapi.SelfHealingPolicyDocument `json:"selfHealing,omitempty"`
 }
 
 type ActualSnapshot struct {
@@ -257,6 +259,10 @@ func BuildDesiredRevisionWithPlacementSnapshot(cfg *config.Config, environment s
 		revision.Services[serviceName] = preserved
 	}
 
+	var environmentConfig *config.EnvironmentConfig
+	if env, ok := cfg.Environments[environment]; ok {
+		environmentConfig = &env
+	}
 	for serviceName, service := range services {
 		imageRef := imageRefs[serviceName]
 		if imageRef == "" {
@@ -270,6 +276,7 @@ func BuildDesiredRevisionWithPlacementSnapshot(cfg *config.Config, environment s
 		}
 
 		desired := sanitizeDesiredService(serviceName, service, imageRef)
+		desired.SelfHealing = SelfHealingPolicyDocument(environmentConfig, service)
 		serviceAssignments := scheduler.Stable(assignments[serviceName])
 		if err := validateDesiredAssignments(cfg, serviceName, serviceAssignments, "service"); err != nil {
 			return nil, err
@@ -858,6 +865,23 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		DependsOn:                sortedCopy(service.DependsOn),
 		HealthCheck:              service.HealthCheck,
 		DeployStrategy:           service.Deploy.Strategy,
+	}
+}
+
+// SelfHealingPolicyDocument resolves a service's effective self-healing
+// policy for desired state; nil when healing is disabled for the service.
+func SelfHealingPolicyDocument(env *config.EnvironmentConfig, service config.ServiceConfig) *takoapi.SelfHealingPolicyDocument {
+	policy := config.EffectiveSelfHealing(env, service)
+	if !policy.Enabled {
+		return nil
+	}
+	return &takoapi.SelfHealingPolicyDocument{
+		Enabled:            true,
+		RestartUnhealthy:   policy.RestartUnhealthy,
+		StartExited:        policy.StartExited,
+		UnhealthyThreshold: policy.UnhealthyThreshold,
+		MaxRestarts:        policy.MaxRestarts,
+		WindowSeconds:      int(policy.Window / time.Second),
 	}
 }
 
