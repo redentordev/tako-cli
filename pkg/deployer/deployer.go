@@ -20,6 +20,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/proxypresets"
 	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -90,6 +91,9 @@ type Deployer struct {
 	runtimeFactoryMu         sync.Mutex
 	assignmentMu             sync.Mutex
 	assignments              map[string][]scheduler.Assignment
+	presetResolver           trustedProxyPresetResolver
+	presetSnapshots          map[string]proxypresets.Snapshot
+	presetMu                 sync.Mutex
 }
 
 const (

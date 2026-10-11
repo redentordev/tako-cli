@@ -1079,9 +1079,12 @@
                       "type": "array",
                       "items": {
                         "type": "string",
-                        "pattern": "^[^/]+/[0-9]+$"
+                        "anyOf": [
+                          { "pattern": "^[^/]+/[0-9]+$" },
+                          { "enum": ["cloudfront", "cloudflare"] }
+                        ]
                       },
-                      "description": "Explicit proxy/CDN CIDRs whose forwarded client IP headers may be trusted. IPv4 prefixes broader than /8 and IPv6 prefixes broader than /24 are rejected. All routes sharing a proxy node must use the same nonempty set."
+                      "description": "Proxy/CDN CIDRs, or the presets cloudfront and cloudflare, whose forwarded client IP headers may be trusted. Presets are resolved to the CDN's published ranges on the deploying machine (cached for 24 hours in the user cache directory) and require takod capability proxy.trusted-proxy-presets-v1. IPv4 prefixes broader than /8 and IPv6 prefixes broader than /24 are rejected. All routes sharing a proxy node must declare the same nonempty set (same CIDRs and same presets)."
                     },
                     "denyPathPrefixes": {
                       "type": "array",

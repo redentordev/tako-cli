@@ -139,3 +139,17 @@ Each PR carries its own tests, schema and docs. PR2 depends on PR1 only for the 
 12. **Bump the route manifest version?** No. Both new fields fail safe when an old takod ignores them. Capability preflight is the gate, as for `trustedProxies` and `responseHeaders` (D3, D4).
 13. **Can a snapshot carry a future `fetchedAt`?** takod rejects snapshots more than 5 minutes ahead of its clock, and the CLI ignores such cache entries. Under newest-wins, a future timestamp would freeze a shared node's ranges.
 14. **What does doctor report?** The local cache age only (D6). Reading node snapshots would need a new endpoint and capability for an informational check.
+
+## Implementation Notes
+
+Deviations and clarifications made while implementing, each chosen as the safest equivalent of the plan:
+
+1. **Exit code for a failed preset resolution.** D2 says "`ConnectivityError`, exit 1", but `engine.ConnectivityError` classifies as exit 4 (node unreachable) and lives in `pkg/engine`, which `pkg/deployer` cannot import. Resolution failures return `proxypresets.ResolveError` (wrapped as `proxy preflight: ...`), which classifies as a failed operation (exit 1) as specified. The fetch cause is flattened into text so an HTTP client timeout is not misclassified as a cancelled operation.
+2. **requestHeaders in replicated state.** Like `responseHeaders`, request-header values are not stored in the replicated desired state (`takodstate` keeps `proxyRequestHeaderNames` only). `tako config export` writes `REDACTED` values and emits the `proxy_request_header_values_redacted` warning.
+3. **Validation command.** There is no `tako config validate`; the docs examples were verified with `tako validate`, and the snippets are covered by `docs/docs_snippets_test.go`.
+4. **Capabilities for presets.** A preset-only route still trusts proxies, so it requires `proxy.trusted-proxies-v1` in addition to `proxy.trusted-proxy-presets-v1`. takod also switches the `allowIps` matcher to `client_ip` for routes that trust only presets.
+5. **Preset name normalization.** Preset names are accepted case-insensitively, canonicalized to lowercase, and sorted together with the canonical CIDRs in `proxy.trustedProxies`. Names that look like words but are not supported presets get an "unknown preset" error listing `cloudflare, cloudfront`.
+6. **Source fingerprint.** SHA-256 over each source URL, its body length, and its raw body, in the preset's URL order.
+7. **No cache directory.** When `os.UserCacheDir()` fails, the resolver silently resolves without a cache; only cache write failures warn. `tako doctor` reports the missing cache directory in its new local "Trusted Proxy Presets" section.
+8. **Coverage of manifest writers.** deploy, `run`, project rollback, placement apply, `scale` and `preflightAndSetupTakodRuntime` all call `PreflightTakodProxyCapabilities`, and `reconcileTakodProxyWithOptions` preflights before rendering, so resolution is tested at that shared entry point (deployer tests for preflight, reconcile and render-without-preflight) rather than per engine command.
+9. **Doctor suggestion.** The existing trusted-proxy warning (doctor and domain checks) suggests `trustedProxies: [cloudflare]` for `cdn: cloudflare`, and a CIDR list or a preset otherwise.

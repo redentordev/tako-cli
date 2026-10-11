@@ -19,6 +19,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/alerttarget"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/proxypresets"
 	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/bcrypt"
@@ -250,9 +251,26 @@ func ValidationWarnings(cfg *Config) []ValidationWarning {
 					Message:     fmt.Sprintf("environment %s service %s uses proxy.dynamicDomains behind proxy.cdn=%s; on-demand HTTP-01 issuance can fail when the CDN does not pass ACME challenge requests through to Tako", environmentName, serviceName, proxy.CDN),
 				})
 			}
+			if presets := proxy.TrustedProxyPresets(); len(presets) > 0 && !proxyPinsForwardedHost(proxy) {
+				warnings = append(warnings, ValidationWarning{
+					Environment: environmentName,
+					Service:     serviceName,
+					Field:       "proxy.trustedProxies",
+					Message:     fmt.Sprintf("environment %s service %s trusts proxy.trustedProxies preset %s without pinning X-Forwarded-Host in proxy.requestHeaders; a preset trusts every customer of that CDN, so anyone can point their own CDN configuration at this origin and supply X-Forwarded-Host and X-Forwarded-For. Pin X-Forwarded-Host to the public hostname in proxy.requestHeaders and, where the client IP matters, restrict origin access", environmentName, serviceName, strings.Join(presets, ", ")),
+				})
+			}
 		}
 	}
 	return warnings
+}
+
+func proxyPinsForwardedHost(proxy *ProxyConfig) bool {
+	for name := range proxy.RequestHeaders {
+		if strings.EqualFold(name, "X-Forwarded-Host") {
+			return true
+		}
+	}
+	return false
 }
 
 // DeprecatedKeysRemovalRelease is the release in which deprecated no-op config
@@ -2270,8 +2288,16 @@ func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
 	trustedProxies := make(map[string]struct{}, len(proxy.TrustedProxies))
 	for _, entry := range proxy.TrustedProxies {
 		trimmed := strings.TrimSpace(entry)
+		if preset := strings.ToLower(trimmed); proxypresets.IsPreset(preset) {
+			// Preset names are resolved to CIDRs in proxy preflight.
+			trustedProxies[preset] = struct{}{}
+			continue
+		}
 		prefix, err := netip.ParsePrefix(trimmed)
 		if err != nil {
+			if isTrustedProxyPresetLike(trimmed) {
+				return fmt.Errorf("service %s: unknown proxy.trustedProxies preset %q (supported presets: %s; or use a CIDR)", serviceName, trimmed, strings.Join(proxypresets.Names(), ", "))
+			}
 			return fmt.Errorf("service %s: invalid proxy.trustedProxies CIDR %q", serviceName, trimmed)
 		}
 		prefix = prefix.Masked()
@@ -2468,10 +2494,45 @@ func proxyPathHasDotSegments(value string) bool {
 }
 
 func trustedProxyPrefixTooBroad(prefix netip.Prefix) bool {
-	if prefix.Addr().Is4() {
-		return prefix.Bits() < 8
+	return proxypresets.PrefixTooBroad(prefix)
+}
+
+// isTrustedProxyPresetLike reports whether an entry looks like a preset name
+// rather than a malformed address, for a clearer error.
+func isTrustedProxyPresetLike(value string) bool {
+	if value == "" {
+		return false
 	}
-	return prefix.Bits() < 24
+	for _, r := range value {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// SplitTrustedProxies separates validated proxy.trustedProxies entries into
+// explicit CIDRs and preset names, each in their canonical sorted order.
+func SplitTrustedProxies(entries []string) (cidrs []string, presets []string) {
+	for _, entry := range entries {
+		if proxypresets.IsPreset(entry) {
+			presets = append(presets, entry)
+			continue
+		}
+		cidrs = append(cidrs, entry)
+	}
+	sort.Strings(cidrs)
+	sort.Strings(presets)
+	return cidrs, presets
+}
+
+// TrustedProxyPresets returns the preset names a proxy trusts.
+func (p *ProxyConfig) TrustedProxyPresets() []string {
+	if p == nil {
+		return nil
+	}
+	_, presets := SplitTrustedProxies(p.TrustedProxies)
+	return presets
 }
 
 func validateInternalProxy(projectName string, envName string, serviceName string, proxy *ProxyConfig) error {

@@ -173,6 +173,17 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 			t.Fatalf("responseHeaders forbidden-name schema misses %q", value)
 		}
 	}
+	trustedItems := schemaPath(t, proxyProperties, "trustedProxies", "items")
+	trustedAlternatives, ok := trustedItems["anyOf"].([]any)
+	if !ok || len(trustedAlternatives) != 2 {
+		t.Fatalf("trustedProxies items = %#v", trustedItems)
+	}
+	if presets := trustedAlternatives[1].(map[string]any)["enum"]; !reflect.DeepEqual(presets, []any{"cloudfront", "cloudflare"}) {
+		t.Fatalf("trustedProxies presets = %#v", presets)
+	}
+	if cidr := regexp.MustCompile(trustedAlternatives[0].(map[string]any)["pattern"].(string)); !cidr.MatchString("203.0.113.0/24") || cidr.MatchString("fastly") {
+		t.Fatalf("trustedProxies CIDR pattern is incorrect")
+	}
 	requestHeaders := schemaPath(t, proxyProperties, "requestHeaders")
 	if requestHeaders["maxProperties"] != float64(32) {
 		t.Fatalf("requestHeaders schema = %#v", requestHeaders)

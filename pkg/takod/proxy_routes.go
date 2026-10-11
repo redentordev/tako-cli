@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/proxypresets"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
@@ -80,26 +81,41 @@ type ProxyRouteManifest struct {
 }
 
 type ProxyRoute struct {
-	Service           string               `json:"service"`
-	Revision          string               `json:"revision,omitempty"`
-	Domains           []string             `json:"domains,omitempty"`
-	RedirectFrom      []string             `json:"redirectFrom,omitempty"`
-	Upstreams         []string             `json:"upstreams"`
-	HealthCheck       *ProxyRouteHealth    `json:"healthCheck,omitempty"`
-	Sticky            bool                 `json:"sticky,omitempty"`
-	Priority          int                  `json:"priority,omitempty"`
-	Visibility        string               `json:"visibility,omitempty"`
-	DynamicDomain     *ProxyDynamicDomain  `json:"dynamicDomain,omitempty"`
-	BasicAuth         *ProxyRouteBasicAuth `json:"basicAuth,omitempty"`
-	AllowIPs          []string             `json:"allowIps,omitempty"`
-	TrustedProxies    []string             `json:"trustedProxies,omitempty"`
-	DenyPathPrefixes  []string             `json:"denyPathPrefixes,omitempty"`
-	AllowPathPrefixes []string             `json:"allowPathPrefixes,omitempty"`
-	MaxRequestBody    string               `json:"maxRequestBody,omitempty"`
-	ResponseHeaders   map[string]string    `json:"responseHeaders,omitempty"`
-	RequestHeaders    map[string]string    `json:"requestHeaders,omitempty"`
-	Destinations      []ProxyDestination   `json:"destinations,omitempty"`
+	Service        string               `json:"service"`
+	Revision       string               `json:"revision,omitempty"`
+	Domains        []string             `json:"domains,omitempty"`
+	RedirectFrom   []string             `json:"redirectFrom,omitempty"`
+	Upstreams      []string             `json:"upstreams"`
+	HealthCheck    *ProxyRouteHealth    `json:"healthCheck,omitempty"`
+	Sticky         bool                 `json:"sticky,omitempty"`
+	Priority       int                  `json:"priority,omitempty"`
+	Visibility     string               `json:"visibility,omitempty"`
+	DynamicDomain  *ProxyDynamicDomain  `json:"dynamicDomain,omitempty"`
+	BasicAuth      *ProxyRouteBasicAuth `json:"basicAuth,omitempty"`
+	AllowIPs       []string             `json:"allowIps,omitempty"`
+	TrustedProxies []string             `json:"trustedProxies,omitempty"`
+	// TrustedProxyPresets carries CLI-resolved CDN preset snapshots. Explicit
+	// CIDRs stay in TrustedProxies so older agents never see preset names.
+	TrustedProxyPresets []ProxyTrustedProxyPreset `json:"trustedProxyPresets,omitempty"`
+	DenyPathPrefixes    []string                  `json:"denyPathPrefixes,omitempty"`
+	AllowPathPrefixes   []string                  `json:"allowPathPrefixes,omitempty"`
+	MaxRequestBody      string                    `json:"maxRequestBody,omitempty"`
+	ResponseHeaders     map[string]string         `json:"responseHeaders,omitempty"`
+	RequestHeaders      map[string]string         `json:"requestHeaders,omitempty"`
+	Destinations        []ProxyDestination        `json:"destinations,omitempty"`
 }
+
+// ProxyTrustedProxyPreset is one resolved trusted-proxy preset snapshot with
+// its provenance. On a shared node the newest snapshot of each preset wins.
+type ProxyTrustedProxyPreset struct {
+	Name              string    `json:"name"`
+	FetchedAt         time.Time `json:"fetchedAt"`
+	SourceFingerprint string    `json:"sourceFingerprint"`
+	CIDRs             []string  `json:"cidrs"`
+}
+
+// proxyRouteNow is the node clock used to reject future preset snapshots.
+var proxyRouteNow = time.Now
 
 // ProxyRouteBasicAuth protects a route's serving domains with HTTP basic
 // auth. PasswordBcrypt is a pre-computed hash, never plaintext.
@@ -318,6 +334,9 @@ func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 			if !isSafeTrustedProxyPrefix(entry) {
 				return fmt.Errorf("route %s: invalid trusted proxy CIDR %q", route.Service, entry)
 			}
+		}
+		if err := validateProxyTrustedProxyPresets(route.TrustedProxyPresets, proxyRouteNow()); err != nil {
+			return fmt.Errorf("route %s: %w", route.Service, err)
 		}
 		if err := validateProxyRoutePolicy(route); err != nil {
 			return fmt.Errorf("route %s: %w", route.Service, err)
@@ -907,7 +926,7 @@ func writeCaddyRoutePolicyHandlers(b *strings.Builder, indent string, address st
 		// Caddy's default directive order would otherwise run basic_auth
 		// ahead of a bare respond matcher and 401 denied addresses.
 		matcher := "remote_ip"
-		if len(route.TrustedProxies) > 0 {
+		if proxyRouteTrustsProxies(route) {
 			matcher = "client_ip"
 		}
 		b.WriteString(indent + "@tako_allowed " + matcher + " " + strings.Join(route.AllowIPs, " ") + "\n")
@@ -1291,11 +1310,54 @@ func isSafeTrustedProxyPrefix(value string) bool {
 	return prefix.Bits() >= 24
 }
 
+// validateProxyTrustedProxyPresets checks preset snapshots when a manifest is
+// written: known name, safe canonical CIDRs within the prefix cap, a SHA-256
+// fingerprint, and a fetch time no more than five minutes ahead of now.
+func validateProxyTrustedProxyPresets(presets []ProxyTrustedProxyPreset, now time.Time) error {
+	seen := make(map[string]bool, len(presets))
+	for _, preset := range presets {
+		if !proxypresets.IsPreset(preset.Name) {
+			return fmt.Errorf("unknown trusted proxy preset %q", preset.Name)
+		}
+		if seen[preset.Name] {
+			return fmt.Errorf("duplicate trusted proxy preset %q", preset.Name)
+		}
+		seen[preset.Name] = true
+		if preset.FetchedAt.IsZero() {
+			return fmt.Errorf("trusted proxy preset %s has no fetch time", preset.Name)
+		}
+		if preset.FetchedAt.After(now.Add(proxypresets.MaxClockSkew)) {
+			return fmt.Errorf("trusted proxy preset %s snapshot fetch time %s is more than %s ahead of this node's clock; check the deploying machine's clock", preset.Name, preset.FetchedAt.UTC().Format(time.RFC3339), proxypresets.MaxClockSkew)
+		}
+		if !proxyRouteFingerprintPattern.MatchString(preset.SourceFingerprint) {
+			return fmt.Errorf("trusted proxy preset %s has an invalid source fingerprint", preset.Name)
+		}
+		if len(preset.CIDRs) == 0 || len(preset.CIDRs) > proxypresets.MaxPrefixes {
+			return fmt.Errorf("trusted proxy preset %s must carry between 1 and %d CIDRs", preset.Name, proxypresets.MaxPrefixes)
+		}
+		for _, entry := range preset.CIDRs {
+			if !isSafeTrustedProxyPrefix(entry) {
+				return fmt.Errorf("trusted proxy preset %s has invalid trusted proxy CIDR %q", preset.Name, entry)
+			}
+		}
+	}
+	return nil
+}
+
+var proxyRouteFingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// proxyTrustedProxySet computes the node-global trusted proxy set. Routes must
+// declare the same identity (explicit CIDRs plus preset names); for each
+// preset the newest snapshot on the node wins, ties broken by the greatest
+// source fingerprint, so an older route never regresses a newer range list.
 func proxyTrustedProxySet(routes []ProxyRoute) ([]string, error) {
 	var selected []string
+	selectedIdentity := ""
 	selectedService := ""
+	declared := false
+	newest := make(map[string]ProxyTrustedProxyPreset)
 	for _, route := range routes {
-		if len(route.TrustedProxies) == 0 {
+		if len(route.TrustedProxies) == 0 && len(route.TrustedProxyPresets) == 0 {
 			continue
 		}
 		seen := make(map[string]struct{}, len(route.TrustedProxies))
@@ -1307,16 +1369,49 @@ func proxyTrustedProxySet(routes []ProxyRoute) ([]string, error) {
 			current = append(current, prefix)
 		}
 		sort.Strings(current)
-		if selected == nil {
+		names := make([]string, 0, len(route.TrustedProxyPresets))
+		for _, preset := range route.TrustedProxyPresets {
+			names = append(names, preset.Name)
+			existing, ok := newest[preset.Name]
+			if !ok || preset.FetchedAt.After(existing.FetchedAt) || (preset.FetchedAt.Equal(existing.FetchedAt) && preset.SourceFingerprint > existing.SourceFingerprint) {
+				newest[preset.Name] = preset
+			}
+		}
+		sort.Strings(names)
+		identity := strings.Join(current, "\x00") + "\x01" + strings.Join(names, "\x00")
+		if !declared {
+			declared = true
 			selected = current
+			selectedIdentity = identity
 			selectedService = route.Service
 			continue
 		}
-		if strings.Join(current, "\x00") != strings.Join(selected, "\x00") {
-			return nil, fmt.Errorf("proxy routes %s and %s declare conflicting trusted proxy CIDR sets; all routes sharing a node must use the same nonempty proxy.trustedProxies set", selectedService, route.Service)
+		if identity != selectedIdentity {
+			return nil, fmt.Errorf("proxy routes %s and %s declare conflicting trusted proxy CIDR sets; all routes sharing a node must use the same nonempty proxy.trustedProxies set (the same CIDRs and the same presets)", selectedService, route.Service)
 		}
 	}
-	return selected, nil
+	if len(newest) == 0 {
+		return selected, nil
+	}
+	merged := make(map[string]struct{}, len(selected))
+	for _, prefix := range selected {
+		merged[prefix] = struct{}{}
+	}
+	for _, preset := range newest {
+		for _, prefix := range preset.CIDRs {
+			merged[prefix] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(merged))
+	for prefix := range merged {
+		out = append(out, prefix)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func proxyRouteTrustsProxies(route ProxyRoute) bool {
+	return len(route.TrustedProxies) > 0 || len(route.TrustedProxyPresets) > 0
 }
 
 func isSafeProxyHost(value string) bool {

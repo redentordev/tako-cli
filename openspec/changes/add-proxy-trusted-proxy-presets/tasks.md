@@ -19,13 +19,13 @@
 
 ## 2. PR2: Preset resolution
 
-- [ ] 2.1 Add `pkg/proxypresets` with the D1 table, strict parsers, prefix validation shared with `validator.go:2269-2286` and `:2398`, the 1-512 bound, and a 16 MiB body cap. Verify with parser tests on recorded fixtures of both sources, plus:
+- [x] 2.1 Add `pkg/proxypresets` with the D1 table, strict parsers, prefix validation shared with `validator.go:2269-2286` and `:2398`, the 1-512 bound, and a 16 MiB body cap. Verify with parser tests on recorded fixtures of both sources, plus:
   - malformed JSON;
   - empty lists;
   - a too-broad prefix;
   - more than 512 prefixes;
   - an oversize body.
-- [ ] 2.2 Implement the D2 cache (atomic write, 24h freshness, 30-day stale limit) with an injectable clock, HTTP client and cache dir. Verify with tests:
+- [x] 2.2 Implement the D2 cache (atomic write, 24h freshness, 30-day stale limit) with an injectable clock, HTTP client and cache dir. Verify with tests:
   - a fresh cache makes no network call;
   - a stale cache is refetched;
   - a fetch failure with a cache under 30 days warns;
@@ -33,27 +33,27 @@
   - a corrupt cache entry, or one with `fetchedAt` more than 5 minutes ahead, is treated as missing;
   - an unavailable or unwritable cache dir still resolves through a fetch and warns on write failure;
   - a stale-cache snapshot keeps its original `fetchedAt`.
-- [ ] 2.3 Accept preset names in `TrustedProxies` validation. At config time only names are checked; CIDRs are resolved in preflight. Update `schema/tako.schema.json:1078` (items: CIDR pattern or enum). Verify with config and schema tests, including the unknown-name error listing the supported presets.
+- [x] 2.3 Accept preset names in `TrustedProxies` validation. At config time only names are checked; CIDRs are resolved in preflight. Update `schema/tako.schema.json:1078` (items: CIDR pattern or enum). Verify with config and schema tests, including the unknown-name error listing the supported presets.
 
 ## 3. PR2: Shipping and node merge
 
-- [ ] 3.1 Resolve presets inside `PreflightTakodProxyCapabilities` (`pkg/deployer/takod_proxy.go:59-99`) before the capability checks, and memoize the snapshots on the `Deployer`. Populate `trustedProxyPresets` in the route manifest (`:537-553`), keeping explicit CIDRs in `trustedProxies`. Rendering a preset-declaring service without a memoized snapshot returns an error. Verify with deployer tests:
+- [x] 3.1 Resolve presets inside `PreflightTakodProxyCapabilities` (`pkg/deployer/takod_proxy.go:59-99`) before the capability checks, and memoize the snapshots on the `Deployer`. Populate `trustedProxyPresets` in the route manifest (`:537-553`), keeping explicit CIDRs in `trustedProxies`. Rendering a preset-declaring service without a memoized snapshot returns an error. Verify with deployer tests:
   - the manifest carries provenance;
   - a resolution failure aborts before any proxy-file write;
   - the deploy, `run`, project rollback, placement apply and `reconcileTakodProxyWithOptions` paths all resolve before writing;
   - rendering without preflight errors.
-- [ ] 3.2 Add `CapabilityProxyTrustedProxyPresetsV1`, gated on non-empty presets, with no manifest version bump (D3). Verify with preflight tests.
-- [ ] 3.3 Rewrite `proxyTrustedProxySet` (`proxy_routes.go:1223`) per D3: declared-identity comparison, newest snapshot per preset with the fingerprint tie-break, and write-time validation of snapshots (prefix safety, cap, known name, `fetchedAt` no more than 5 minutes ahead). Verify with tests in `proxy_access_test.go`:
+- [x] 3.2 Add `CapabilityProxyTrustedProxyPresetsV1`, gated on non-empty presets, with no manifest version bump (D3). Verify with preflight tests.
+- [x] 3.3 Rewrite `proxyTrustedProxySet` (`proxy_routes.go:1223`) per D3: declared-identity comparison, newest snapshot per preset with the fingerprint tie-break, and write-time validation of snapshots (prefix safety, cap, known name, `fetchedAt` no more than 5 minutes ahead). Verify with tests in `proxy_access_test.go`:
   - two projects with the same preset and different snapshots: the newest wins and there is no conflict;
   - a preset versus an explicit CIDR list conflicts;
   - a future `fetchedAt` is rejected;
   - CIDR-only routes are unchanged (the `:129` test still passes).
-- [ ] 3.4 Emit the D4 config warning for a service that trusts a preset without pinning `X-Forwarded-Host` in `requestHeaders`. Verify with config warning tests: a warning for a preset without a pin, none with a pin, and none for explicit CIDRs only.
+- [x] 3.4 Emit the D4 config warning for a service that trusts a preset without pinning `X-Forwarded-Host` in `requestHeaders`. Verify with config warning tests: a warning for a preset without a pin, none with a pin, and none for explicit CIDRs only.
 
 ## 4. PR2: Doctor and docs
 
-- [ ] 4.1 `tako doctor`: report each configured preset's local cache age and warn after 30 days, and suggest the matching preset in the existing trusted-proxy warning (`cmd/doctor.go:247`). Verify with doctor tests.
-- [ ] 4.2 Docs: extend "Behind a CDN" in `docs/CONFIGURATION.md` with Cloudflare, `trustedProxies: [cloudfront]`, the every-CDN-customer warning, the cache location, and deleting the cache file to force a refresh. Update `docs/ORCHESTRATION-MODEL.md:770-782` for the shared-node rule. Verify the examples with `tako config validate`.
+- [x] 4.1 `tako doctor`: report each configured preset's local cache age and warn after 30 days, and suggest the matching preset in the existing trusted-proxy warning (`cmd/doctor.go:247`). Verify with doctor tests.
+- [x] 4.2 Docs: extend "Behind a CDN" in `docs/CONFIGURATION.md` with Cloudflare, `trustedProxies: [cloudfront]`, the every-CDN-customer warning, the cache location, and deleting the cache file to force a refresh. Update `docs/ORCHESTRATION-MODEL.md:770-782` for the shared-node rule. Verify the examples with `tako config validate`.
 
 ## 5. Verification
 
