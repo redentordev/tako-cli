@@ -1055,6 +1055,63 @@ func (m *SourceAlertManager) releaseLedgerLocked(scope *sourceAlertScope, subjec
 	}
 }
 
+// handOverLedgerLocked moves the ledger ownership of a retiring subject's
+// endpoints to another open scope whose episode for the same node-scoped
+// subject was suppressed on that endpoint, and queues that scope's opening
+// to it (re-notify). It returns the retiring scope's target IDs handed over.
+func (m *SourceAlertManager) handOverLedgerLocked(scope *sourceAlertScope, subject *sourceSubjectState, now time.Time) map[string]bool {
+	handed := map[string]bool{}
+	if !m.ledgerApplies(subject) {
+		return handed
+	}
+	owner := alertScopeKey(scope.project, scope.environment)
+	subjectKey := sourceSubjectKey(subject.Kind, subject.Subject)
+	keys := make([]string, 0, len(m.scopes))
+	for key := range m.scopes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, targetID := range sortedTargetSet(subject.NotifiedTargets) {
+		target, ok := scope.targets[targetID]
+		if !ok {
+			continue
+		}
+		fingerprint := targetFingerprint(target)
+		key := ledgerKey(subject.Kind, subject.Subject, fingerprint)
+		if entry := m.ledger[key]; entry == nil || entry.Scope != owner {
+			continue
+		}
+		for _, otherKey := range keys {
+			other := m.scopes[otherKey]
+			if other == nil || other == scope || other.retiring {
+				continue
+			}
+			otherSubject := other.state.Subjects[subjectKey]
+			if otherSubject == nil || !otherSubject.Notified || !otherSubject.Active {
+				continue
+			}
+			suppressed := ""
+			for _, otherTarget := range sortedTargetSet(otherSubject.SuppressedTargets) {
+				if candidate, ok := other.targets[otherTarget]; ok && targetFingerprint(candidate) == fingerprint {
+					suppressed = otherTarget
+					break
+				}
+			}
+			if suppressed == "" {
+				continue
+			}
+			m.ledger[key] = &sourceLedgerEntry{Scope: otherKey, EpisodeID: otherSubject.EpisodeID, At: now}
+			m.ledgerDirty = true
+			delete(otherSubject.SuppressedTargets, suppressed)
+			m.queueLocked(other, otherSubject, AlertTransitionOpening, []string{suppressed}, now, nil)
+			other.dirty = true
+			handed[targetID] = true
+			break
+		}
+	}
+	return handed
+}
+
 func (m *SourceAlertManager) eventEventName(source *registeredAlertSource, reason string) string {
 	return source.spec.Events[reason]
 }
@@ -1202,6 +1259,12 @@ func (m *SourceAlertManager) retireSubjectLocked(scope *sourceAlertScope, key st
 		return
 	}
 	if subject.Notified {
+		// Endpoints this scope owned in the ledger for a node-scoped subject
+		// that another scope still alerts on move to that scope; they get no
+		// retired recovery, which would be a false all-clear.
+		for target := range m.handOverLedgerLocked(scope, subject, m.now()) {
+			delete(subject.NotifiedTargets, target)
+		}
 		subject.Active = false
 		m.recoverLocked(scope, subject, m.now(), map[string]string{alertDetailRetired: "true"})
 	}

@@ -262,6 +262,37 @@ func TestPerServiceWebhookRouting(t *testing.T) {
 	}
 }
 
+func TestSharedTargetOwnershipHandsOverOnRetirement(t *testing.T) {
+	h := newSourceTestHarness(t, t.TempDir())
+	for _, project := range []string{"shop", "blog"} {
+		if err := h.manager.ApplyConfig(testMonitorRequest(project, "production")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One full disk, seen by both scopes: the shared Slack target gets one
+	// opening, from the scope that claimed the ledger first.
+	h.level("shop", "production", AlertKindHost, "root", "disk_high")
+	h.level("blog", "production", AlertKindHost, "root", "disk_high")
+	if sent := h.dispatch(); len(sent) != 1 || sent[0].Payload["project"] != "shop" {
+		t.Fatalf("openings = %+v, want one from shop", sent)
+	}
+	// The owning scope goes away while the disk is still full: no false
+	// all-clear; the other scope takes over the endpoint and re-notifies.
+	if err := h.manager.RemoveScope("shop", "production"); err != nil {
+		t.Fatal(err)
+	}
+	sent := h.dispatch()
+	if len(sent) != 1 || sent[0].Payload["transition"] != "opening" || sent[0].Payload["project"] != "blog" {
+		t.Fatalf("handover deliveries = %+v, want only blog's opening", sent)
+	}
+	// The new owner's recovery reaches the endpoint when the disk recovers.
+	h.advance(time.Minute)
+	h.level("blog", "production", AlertKindHost, "root")
+	if sent := h.dispatch(); len(sent) != 1 || sent[0].Payload["transition"] != "recovery" || sent[0].Payload["project"] != "blog" {
+		t.Fatalf("recovery = %+v", sent)
+	}
+}
+
 func TestSeverityEscalation(t *testing.T) {
 	h := newSourceTestHarness(t, t.TempDir())
 	if err := h.manager.ApplyConfig(testMonitorRequest("shop", "production")); err != nil {
