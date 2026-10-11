@@ -57,6 +57,11 @@ func (d *Deployer) ReconcileTakodProxyWithActiveRevisions(services map[string]co
 // PreflightTakodProxyCapabilities verifies every proxy target understands all
 // route-manifest fields before an applying workflow mutates service state.
 func (d *Deployer) PreflightTakodProxyCapabilities(services map[string]config.ServiceConfig) error {
+	// Resolve CDN presets first so every route-manifest writer has the
+	// snapshots before mutation, and a fetch failure stops it cleanly.
+	if err := d.resolveTrustedProxyPresets(services); err != nil {
+		return err
+	}
 	requirements := takodProxyCapabilityRequirements(services)
 	allServers, err := d.getTakodTargetServers()
 	if err != nil {
@@ -534,22 +539,28 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			}
 		}
 
+		trustedCIDRs, trustedPresets, err := d.trustedProxyRouteFields(serviceName, service.Proxy)
+		if err != nil {
+			return nil, false, err
+		}
 		route := takod.ProxyRoute{
-			Service:           serviceName,
-			Revision:          revision,
-			Domains:           domains,
-			RedirectFrom:      redirects,
-			Upstreams:         upstreams,
-			HealthCheck:       proxyRouteHealthCheckForService(service),
-			Sticky:            service.LoadBalancer.Strategy == "sticky",
-			Visibility:        service.Proxy.EffectiveVisibility(),
-			AllowIPs:          append([]string(nil), service.Proxy.AllowIps...),
-			TrustedProxies:    append([]string(nil), service.Proxy.TrustedProxies...),
-			DenyPathPrefixes:  append([]string(nil), service.Proxy.DenyPathPrefixes...),
-			AllowPathPrefixes: append([]string(nil), service.Proxy.AllowPathPrefixes...),
-			MaxRequestBody:    service.Proxy.MaxRequestBody,
-			ResponseHeaders:   cloneProxyResponseHeaders(service.Proxy.ResponseHeaders),
-			Destinations:      destinations,
+			Service:             serviceName,
+			Revision:            revision,
+			Domains:             domains,
+			RedirectFrom:        redirects,
+			Upstreams:           upstreams,
+			HealthCheck:         proxyRouteHealthCheckForService(service),
+			Sticky:              service.LoadBalancer.Strategy == "sticky",
+			Visibility:          service.Proxy.EffectiveVisibility(),
+			AllowIPs:            append([]string(nil), service.Proxy.AllowIps...),
+			TrustedProxies:      trustedCIDRs,
+			TrustedProxyPresets: trustedPresets,
+			DenyPathPrefixes:    append([]string(nil), service.Proxy.DenyPathPrefixes...),
+			AllowPathPrefixes:   append([]string(nil), service.Proxy.AllowPathPrefixes...),
+			MaxRequestBody:      service.Proxy.MaxRequestBody,
+			ResponseHeaders:     cloneProxyResponseHeaders(service.Proxy.ResponseHeaders),
+			RequestHeaders:      cloneProxyResponseHeaders(service.Proxy.RequestHeaders),
+			Destinations:        destinations,
 		}
 		if auth := service.Proxy.BasicAuth; auth != nil {
 			route.BasicAuth = &takod.ProxyRouteBasicAuth{
@@ -624,6 +635,15 @@ func proxyServicesUseRoutePolicy(services map[string]config.ServiceConfig) bool 
 	return false
 }
 
+func proxyServicesUseRequestHeaders(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.IsProxied() && service.Proxy != nil && len(service.Proxy.RequestHeaders) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func proxyServicesUseAllowPathPrefixes(services map[string]config.ServiceConfig) bool {
 	for _, service := range services {
 		if service.IsProxied() && service.Proxy != nil && len(service.Proxy.AllowPathPrefixes) > 0 {
@@ -673,6 +693,12 @@ func takodProxyCapabilityRequirements(services map[string]config.ServiceConfig) 
 	}
 	if proxyServicesUseRoutePolicy(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyRoutePolicyV1, Feature: "proxy route policy"})
+	}
+	if len(proxyServicesTrustedProxyPresets(services)) > 0 {
+		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyTrustedProxyPresetsV1, Feature: "proxy trusted proxy presets"})
+	}
+	if proxyServicesUseRequestHeaders(services) {
+		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyRequestHeadersV1, Feature: "proxy request headers"})
 	}
 	if proxyServicesUseAllowPathPrefixes(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyAllowPathPrefixesV1, Feature: "proxy allow path prefixes"})

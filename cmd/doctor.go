@@ -23,6 +23,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
+	"github.com/redentordev/tako-cli/pkg/proxypresets"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -160,6 +161,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	heading("Local Build Inputs")
 	checkLocalBuildInputs(record, cfg, envName)
 
+	heading("Trusted Proxy Presets")
+	checkTrustedProxyPresetCache(record, cfg, envName)
+
 	remoteSections := []string{
 		"Server Connectivity",
 		"Server Agent Version",
@@ -226,6 +230,71 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	return finish()
 }
 
+func capitalizeFirst(value string) string {
+	if value == "" {
+		return value
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
+}
+
+func checkTrustedProxyPresetCache(record func(checkResult), cfg *config.Config, envName string) {
+	cacheDir, err := proxypresets.DefaultCacheDir()
+	if err != nil {
+		cacheDir = ""
+	}
+	checkTrustedProxyPresetCacheWith(record, cfg, envName, cacheDir, time.Now().UTC())
+}
+
+// checkTrustedProxyPresetCacheWith reports the local cache age of each
+// configured trusted-proxy preset. Node snapshots are not read back: their
+// age is bounded by the last deploy, which used a snapshot at most 30 days old.
+func checkTrustedProxyPresetCacheWith(record func(checkResult), cfg *config.Config, envName string, cacheDir string, now time.Time) {
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot inspect trusted proxy presets: %v", err), "Fix the environment configuration"})
+		return
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, service := range services {
+		if !service.IsProxied() || service.Proxy == nil {
+			continue
+		}
+		for _, name := range service.Proxy.TrustedProxyPresets() {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		record(checkResult{"SKIP", "No services trust a CDN preset", ""})
+		return
+	}
+	for _, name := range names {
+		if cacheDir == "" {
+			record(checkResult{"WARN", fmt.Sprintf("%s: user cache directory is unavailable; ranges are fetched on every deploy", name), "Set HOME (or XDG_CACHE_HOME) so preset ranges can be cached"})
+			continue
+		}
+		snapshot, ok := proxypresets.ReadCachedSnapshot(cacheDir, name, now)
+		if !ok {
+			record(checkResult{"WARN", fmt.Sprintf("%s: no valid cached ranges in %s", name, proxypresets.CachePath(cacheDir, name)), "The next deploy fetches them; it fails before mutation if the range URL is unreachable"})
+			continue
+		}
+		age := now.Sub(snapshot.FetchedAt)
+		if age < 0 {
+			age = 0
+		}
+		message := fmt.Sprintf("%s: %d ranges cached %s ago (%s)", name, len(snapshot.CIDRs), proxypresets.FormatAge(age), proxypresets.CachePath(cacheDir, name))
+		if age >= proxypresets.StaleLimit {
+			record(checkResult{"WARN", message, "Cached ranges are older than 30 days and are no longer used as a fallback; the next deploy must fetch fresh ranges"})
+			continue
+		}
+		record(checkResult{"PASS", message, ""})
+	}
+}
+
 // doctorListPreviews lists previews for the doctor check; a seam for tests.
 var doctorListPreviews = func(ctx context.Context, cfg *config.Config) (*engine.PreviewListResult, error) {
 	return cliEngine().ListPreviews(ctx, cfg)
@@ -282,7 +351,7 @@ func checkProxyClientIPTopologyWith(record func(checkResult), specs []engine.Dom
 		checked++
 		status := check(spec)
 		if status.DNS == health.DomainDNSProxied || status.DNS == health.DomainDNSWrong {
-			record(checkResult{"WARN", fmt.Sprintf("%s (%s): access controls appear behind a proxy/CDN without proxy.trustedProxies", spec.Domain, spec.Service), "Set proxy.trustedProxies to the upstream proxy's explicit CIDRs"})
+			record(checkResult{"WARN", fmt.Sprintf("%s (%s): access controls appear behind a proxy/CDN without proxy.trustedProxies", spec.Domain, spec.Service), capitalizeFirst(engine.TrustedProxySuggestion(spec.CDN))})
 			continue
 		}
 		record(checkResult{"PASS", fmt.Sprintf("%s (%s): no untrusted proxy/CDN client-IP mismatch detected", spec.Domain, spec.Service), ""})

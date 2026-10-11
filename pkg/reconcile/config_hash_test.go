@@ -61,6 +61,12 @@ func TestSafeServiceConfigHashTracksProxyRoutePolicy(t *testing.T) {
 	if baseHash == changedHash {
 		t.Fatal("proxy route policy did not affect config hash")
 	}
+	withRequestHeaders := base
+	withRequestHeaders.Proxy = &config.ProxyConfig{Domain: "example.com", RequestHeaders: map[string]string{"X-Forwarded-Host": "www.example.com"}}
+	requestHash, ok := SafeServiceConfigHash(withRequestHeaders)
+	if !ok || requestHash == baseHash {
+		t.Fatal("proxy request headers did not affect config hash")
+	}
 }
 
 func TestSafeServiceConfigHashTracksPublishedPorts(t *testing.T) {

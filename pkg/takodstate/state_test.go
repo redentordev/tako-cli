@@ -174,6 +174,7 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 			Proxy: &config.ProxyConfig{
 				Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api", "/health"}, MaxRequestBody: "10MB",
 				ResponseHeaders: map[string]string{"Set-Cookie": "session=secret", "X-Content-Type-Options": "nosniff"},
+				RequestHeaders:  map[string]string{"X-Forwarded-Host": "www.example.com", "X-Tenant": "tenant-marker"},
 				BasicAuth:       &config.ProxyBasicAuthConfig{Username: "admin", PasswordBcrypt: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"},
 			},
 			Deploy:    config.DeployConfig{Strategy: "recreate"},
@@ -219,6 +220,9 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	if service.Proxy == nil || service.Proxy.MaxRequestBody != "10MB" || !slices.Equal(service.Proxy.DenyPathPrefixes, []string{"/api/internal"}) || !slices.Equal(service.Proxy.AllowPathPrefixes, []string{"/api", "/health"}) || len(service.Proxy.ResponseHeaders) != 0 {
 		t.Fatalf("proxy policy not persisted: %#v", service.Proxy)
 	}
+	if !slices.Equal(service.ProxyRequestHeaderNames, []string{"X-Forwarded-Host", "X-Tenant"}) || len(service.Proxy.RequestHeaders) != 0 {
+		t.Fatalf("proxy request-header redaction state = %#v", service.ProxyRequestHeaderNames)
+	}
 	if !slices.Equal(service.ProxyResponseHeaderNames, []string{"Set-Cookie", "X-Content-Type-Options"}) {
 		t.Fatalf("proxy response-header redaction state = %#v", service.ProxyResponseHeaderNames)
 	}
@@ -229,7 +233,7 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "N9qo8uLO") || strings.Contains(string(encoded), "session=secret") || strings.Contains(string(encoded), "nosniff") {
+	if strings.Contains(string(encoded), "N9qo8uLO") || strings.Contains(string(encoded), "session=secret") || strings.Contains(string(encoded), "nosniff") || strings.Contains(string(encoded), "tenant-marker") {
 		t.Fatalf("proxy secret value entered desired state: %s", encoded)
 	}
 	if !slices.Equal(revision.TargetNodes, []string{"node-a", "node-b"}) {

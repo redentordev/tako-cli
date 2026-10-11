@@ -266,7 +266,17 @@ func applyDomainAccessControlWarning(status *health.DomainStatus, spec DomainSta
 	if status == nil || !spec.WarnUntrustedAccessControls || (status.DNS != health.DomainDNSProxied && status.DNS != health.DomainDNSWrong) {
 		return
 	}
-	appendDomainWarning(status, "access controls are configured behind a suspected proxy/CDN without proxy.trustedProxies; original client IPs cannot be trusted")
+	appendDomainWarning(status, "access controls are configured behind a suspected proxy/CDN without proxy.trustedProxies; original client IPs cannot be trusted; "+TrustedProxySuggestion(spec.CDN))
+}
+
+// TrustedProxySuggestion recommends a proxy.trustedProxies value for a route
+// whose access controls sit behind a CDN. proxy.cdn: cloudflare suggests the
+// matching preset; cdn never implies trusted proxies by itself.
+func TrustedProxySuggestion(cdn string) string {
+	if normalizeDeclaredCDN(cdn) == config.ProxyCDNCloudflare {
+		return "set proxy.trustedProxies: [cloudflare] to trust Cloudflare's published ranges"
+	}
+	return "set proxy.trustedProxies to the upstream proxy's explicit CIDRs, or to a preset such as [cloudfront] or [cloudflare]"
 }
 
 func appendDomainWarning(status *health.DomainStatus, warning string) {

@@ -292,6 +292,38 @@ func TestPreviewInstanceFromAbstractTemplate(t *testing.T) {
 	}
 }
 
+func TestPreviewInheritsRequestHeadersExceptBaseHostsAndTrustedProxies(t *testing.T) {
+	environments := strings.Replace(previewTestEnvironments, "          redirectFrom: [old.app.example.com]\n", "          redirectFrom: [old.app.example.com]\n          trustedProxies: [cloudfront, 192.0.2.0/24]\n          requestHeaders:\n            X-Forwarded-Host: www.app.example.com\n            X-Forwarded-Proto: https\n", 1)
+	environments = strings.Replace(environments, "          domain: admin.example.com\n", "          domain: admin.example.com\n          requestHeaders:\n            X-Origin-Host: App.Example.com\n", 1)
+	base := mustLoadPreviewTestConfig(t, environments, nil)
+	var fields []string
+	for _, warning := range ValidationWarnings(base) {
+		if strings.HasPrefix(warning.Field, "proxy.requestHeaders.") {
+			fields = append(fields, warning.Service+":"+warning.Field)
+		}
+	}
+	if strings.Join(fields, ",") != "admin:proxy.requestHeaders.X-Origin-Host,web:proxy.requestHeaders.X-Forwarded-Host" {
+		t.Fatalf("pinned request header warnings = %v", fields)
+	}
+
+	cfg := mustLoadPreviewTestConfig(t, environments, &PreviewInstance{Name: "pr-7"})
+	env := cfg.Environments["preview-pr-7"]
+	web := env.Services["web"].Proxy
+	if len(web.RequestHeaders) != 1 || web.RequestHeaders["X-Forwarded-Proto"] != "https" {
+		t.Fatalf("web preview requestHeaders = %v, want only X-Forwarded-Proto", web.RequestHeaders)
+	}
+	if strings.Join(web.TrustedProxies, ",") != strings.Join(cfg.Environments["staging"].Services["web"].Proxy.TrustedProxies, ",") || len(web.TrustedProxies) != 2 {
+		t.Fatalf("web preview trustedProxies = %v", web.TrustedProxies)
+	}
+	if admin := env.Services["admin"].Proxy; len(admin.RequestHeaders) != 0 {
+		t.Fatalf("admin preview requestHeaders = %v, want the pinned header dropped", admin.RequestHeaders)
+	}
+	staging := cfg.Environments["staging"].Services["web"].Proxy
+	if staging.RequestHeaders["X-Forwarded-Host"] != "www.app.example.com" {
+		t.Fatalf("preview policy changed staging requestHeaders: %v", staging.RequestHeaders)
+	}
+}
+
 func TestPreviewKeepJobs(t *testing.T) {
 	environments := strings.Replace(previewTestEnvironments, "      ttl: 72h\n", "      ttl: 72h\n      keepJobs: true\n      maxReplicas: 2\n", 1)
 	cfg := mustLoadPreviewTestConfig(t, environments, &PreviewInstance{Name: "pr-1"})

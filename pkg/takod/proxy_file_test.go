@@ -90,6 +90,18 @@ func TestCaddyfileConformanceMatrix(t *testing.T) {
 			forbidden: []string{"/apiized"},
 		},
 		{
+			name: "request headers",
+			route: ProxyRoute{
+				Service: "web", Domains: []string{"example.com"}, Upstreams: []string{"http://web:3000"},
+				RequestHeaders: map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-Host": "www.example.com"},
+			},
+			wantHash: "6516f6093d630ac26d900dd849fd9121430f051135304104d55a8639c39e90bf",
+			contains: []string{
+				"\treverse_proxy http://web:3000 {\n\t\theader_up X-Forwarded-Host \"www.example.com\"\n\t\theader_up X-Forwarded-Proto \"https\"\n\t}\n",
+			},
+			forbidden: []string{"trusted_proxies", "header_down"},
+		},
+		{
 			name:  "BYO certificates with dynamic authority redirects and multiple domains",
 			route: ProxyRoute{Service: "renderer", Domains: []string{"example.com", "app.example.com"}, RedirectFrom: []string{"www.example.com"}, Upstreams: []string{"http://renderer:3000"}, DynamicDomain: &ProxyDynamicDomain{AskURL: "http://admin:3000/api/domains/authorize"}},
 			certificates: []proxyCertificateEntry{
