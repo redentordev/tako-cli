@@ -52,9 +52,8 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Project.Name == "" {
 		return fmt.Errorf("project name is required")
 	}
-	// Validate project name format (alphanumeric + hyphen, must start with letter)
-	if !isValidProjectName(cfg.Project.Name) {
-		return fmt.Errorf("project name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, and hyphens, and be 1-63 characters long", cfg.Project.Name)
+	if err := ValidateProjectName(cfg.Project.Name); err != nil {
+		return err
 	}
 	if cfg.Project.Version == "" {
 		return fmt.Errorf("project version is required")
@@ -123,6 +122,16 @@ func ValidateConfig(cfg *Config) error {
 		cfg.Environments[envName] = env
 	}
 
+	return nil
+}
+
+// ValidateProjectName reports whether name satisfies the project-name rule:
+// it must start with a lowercase letter, contain only lowercase letters,
+// numbers and hyphens, and be 1-63 characters long.
+func ValidateProjectName(name string) error {
+	if !isValidProjectName(name) {
+		return fmt.Errorf("project name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, and hyphens, and be 1-63 characters long", name)
+	}
 	return nil
 }
 

@@ -19,10 +19,10 @@
 
 ## 4. `tako init` template and validation
 
-- [ ] 4.1 Export `config.ValidateProjectName` (wrapping `isValidProjectName`, with the message from validator.go:57) and call it at the top of `runInit` (`cmd/init.go:32`). Verify with a test that `tako init My_App` in a temp dir errors and creates none of `tako.yaml`, `tako.json`, `.env.example` or `.gitignore`.
-- [ ] 4.2 Restructure `generateYAMLConfig` (`cmd/init.go:226`): move the optional examples into an `[]initExample{Title, Body}` slice rendered by `commentBlock()`. Replace `# registry:` (:430-433) with a `registries: ghcr.io: {username: ${REGISTRY_USER}, password: ${REGISTRY_TOKEN}}` example. Delete `# port:` (:312) and the `# deployment:` block (:390-397). Change "301" to "308" (:289). Re-nest the reference service patterns (:477-519) under `environments.production.services`. Verify that `go test ./cmd -run Init` passes.
-- [ ] 4.3 Add `TestInitVariantsValidate` covering {yaml, json} × {"my-app", "shop-api"}: `LoadConfig` succeeds and `ValidationWarnings` is empty. For each `initExample`, merge `Body` into the base via `internal/configtest` and validate. Also assert that `registry:`, `301` and any `deployment.parallel/cache` examples are absent. Verify with `go test ./cmd -run TestInitVariantsValidate`.
-- [ ] 4.4 Regenerate man pages if the `init` help text changed (`make man`), and verify that `git diff --exit-code man/` is clean afterwards or that the diff is committed.
+- [x] 4.1 Export `config.ValidateProjectName` (wrapping `isValidProjectName`, with the message from validator.go:57) and call it at the top of `runInit` (`cmd/init.go:32`). Verify with a test that `tako init My_App` in a temp dir errors and creates none of `tako.yaml`, `tako.json`, `.env.example` or `.gitignore`.
+- [x] 4.2 Restructure `generateYAMLConfig` (`cmd/init.go:226`): move the optional examples into an `[]initExample{Title, Body}` slice rendered by `commentBlock()`. Replace `# registry:` (:430-433) with a `registries: ghcr.io: {username: ${REGISTRY_USER}, password: ${REGISTRY_TOKEN}}` example. Delete `# port:` (:312) and the `# deployment:` block (:390-397). Change "301" to "308" (:289). Re-nest the reference service patterns (:477-519) under `environments.production.services`. Verify that `go test ./cmd -run Init` passes.
+- [x] 4.3 Add `TestInitVariantsValidate` covering {yaml, json} × {"my-app", "shop-api"}: `LoadConfig` succeeds and `ValidationWarnings` is empty. For each `initExample`, merge `Body` into the base via `internal/configtest` and validate. Also assert that `registry:`, `301` and any `deployment.parallel/cache` examples are absent. Verify with `go test ./cmd -run TestInitVariantsValidate`.
+- [x] 4.4 Regenerate man pages if the `init` help text changed (`make man`), and verify that `git diff --exit-code man/` is clean afterwards or that the diff is committed.
 
 ## 5. Schema parity
 

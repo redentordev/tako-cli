@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -89,7 +90,8 @@ func SetupEnv(t testing.TB) string {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("TAKO_SKIP_UPDATE_CHECK", "1")
-	t.Setenv("TAKO_SSH_KEY", keyPath)
+	// Forward slashes keep the path valid inside JSON strings on Windows.
+	t.Setenv("TAKO_SSH_KEY", filepath.ToSlash(keyPath))
 	for key, value := range Placeholders {
 		t.Setenv(key, value)
 	}
@@ -203,6 +205,126 @@ func mergeMaps(base, overlay map[string]any) map[string]any {
 	return out
 }
 
+// MaterializePaths creates the local files a document points at, relative to
+// dir, so validation does not fail on missing fixtures: build contexts (with a
+// Dockerfile, or the declared dockerfile), shared build contexts, envFile and
+// envFiles entries, and files[].source. Absolute, home-relative and
+// parent-escaping paths are left alone.
+func MaterializePaths(t testing.TB, dir string, content []byte) {
+	t.Helper()
+	var doc any
+	if err := yaml.Unmarshal(content, &doc); err != nil {
+		return // the loader reports the syntax error
+	}
+	materializeNode(t, dir, doc)
+}
+
+func materializeNode(t testing.TB, dir string, node any) {
+	switch value := node.(type) {
+	case []any:
+		for _, item := range value {
+			materializeNode(t, dir, item)
+		}
+	case map[string]any:
+		dockerfile, _ := value["dockerfile"].(string)
+		switch build := value["build"].(type) {
+		case string:
+			materializeBuildContext(t, dir, build, dockerfile)
+		case map[string]any:
+			context, _ := build["context"].(string)
+			buildDockerfile, _ := build["dockerfile"].(string)
+			materializeBuildContext(t, dir, context, buildDockerfile)
+		}
+		if builds, ok := value["builds"].(map[string]any); ok {
+			for _, raw := range builds {
+				if build, ok := raw.(map[string]any); ok {
+					context, _ := build["context"].(string)
+					buildDockerfile, _ := build["dockerfile"].(string)
+					materializeBuildContext(t, dir, context, buildDockerfile)
+				}
+			}
+		}
+		if envFile, ok := value["envFile"].(string); ok {
+			materializeFile(t, dir, envFile)
+		}
+		if envFiles, ok := value["envFiles"].([]any); ok {
+			for _, raw := range envFiles {
+				if envFile, ok := raw.(string); ok {
+					materializeFile(t, dir, envFile)
+				}
+			}
+		}
+		if files, ok := value["files"].([]any); ok {
+			for _, raw := range files {
+				if file, ok := raw.(map[string]any); ok {
+					if source, ok := file["source"].(string); ok {
+						materializeFile(t, dir, source)
+					}
+				}
+			}
+		}
+		for _, child := range value {
+			materializeNode(t, dir, child)
+		}
+	}
+}
+
+func localPath(dir, path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" || strings.Contains(path, "${") || strings.HasPrefix(path, "~") || filepath.IsAbs(path) || strings.HasPrefix(path, "/") {
+		return "", false
+	}
+	clean := filepath.Clean(filepath.FromSlash(path))
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.Join(dir, clean), true
+}
+
+func materializeBuildContext(t testing.TB, dir, context, dockerfile string) {
+	t.Helper()
+	contextPath, ok := localPath(dir, context)
+	if !ok {
+		return
+	}
+	if err := os.MkdirAll(contextPath, 0o755); err != nil {
+		t.Fatalf("create build context %s: %v", context, err)
+	}
+	if strings.TrimSpace(dockerfile) == "" {
+		dockerfile = "Dockerfile"
+	}
+	dockerfilePath, ok := localPath(contextPath, dockerfile)
+	if !ok {
+		return
+	}
+	if _, err := os.Stat(dockerfilePath); err == nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(dockerfilePath), 0o755); err != nil {
+		t.Fatalf("create dockerfile dir: %v", err)
+	}
+	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatalf("write dockerfile fixture: %v", err)
+	}
+}
+
+func materializeFile(t testing.TB, dir, path string) {
+	t.Helper()
+	filePath, ok := localPath(dir, path)
+	if !ok {
+		return
+	}
+	if _, err := os.Stat(filePath); err == nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("create fixture dir: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("EXAMPLE=value\n"), 0o644); err != nil {
+		t.Fatalf("write fixture %s: %v", path, err)
+	}
+}
+
 // LoadAndValidate writes content to dir/name, auto-fills any unset ${VAR} it
 // references, and runs it through config.LoadConfig and
 // config.ValidationWarnings, the same strict path `tako validate` uses. Call
@@ -214,6 +336,7 @@ func LoadAndValidate(t testing.TB, dir, name string, content []byte) (*config.Co
 		t.Fatalf("write %s: %v", path, err)
 	}
 	FillEnv(t, content)
+	MaterializePaths(t, dir, content)
 	cfg, err := config.LoadConfig(path)
 	if err != nil {
 		return nil, nil, err

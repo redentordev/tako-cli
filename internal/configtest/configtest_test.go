@@ -142,6 +142,30 @@ func TestSetupEnvAndAutoFill(t *testing.T) {
 	}
 }
 
+func TestMaterializePathsCreatesLocalFixturesOnly(t *testing.T) {
+	dir := t.TempDir()
+	MaterializePaths(t, dir, []byte(`environments:
+  production:
+    services:
+      api:
+        build: ./api
+      web:
+        build: ./web
+        dockerfile: docker/Dockerfile.prod
+        envFile: .env.web
+      escape:
+        build: ../outside
+`))
+	for _, path := range []string{"api/Dockerfile", "web/docker/Dockerfile.prod", ".env.web"} {
+		if _, err := os.Stat(dir + "/" + path); err != nil {
+			t.Fatalf("expected fixture %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(dir + "/../outside"); err == nil {
+		t.Fatal("parent-escaping build path should not be created")
+	}
+}
+
 func TestLoadAndValidateBaseWithService(t *testing.T) {
 	SetupEnv(t)
 	merged, err := MergeYAML([]byte(BaseYAML), []byte(`environments:
