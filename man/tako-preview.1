@@ -1,0 +1,55 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-preview - List, destroy and prune preview environments
+
+
+.SH SYNOPSIS
+\fBtako preview [flags]\fP
+
+
+.SH DESCRIPTION
+Manage preview environments: short-lived copies of a template environment,
+one per pull request or branch, created with 'tako deploy --preview \&'.
+
+.PP
+See docs/PREVIEW-ENVIRONMENTS.md for template setup, DNS and limits.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for preview
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to use (default: the only environment, else production, else the first alphabetically)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB--preview\fP=""
+	preview environment to use (deploy, ps, logs, exec, history, rollback, config explain); -e then names its base
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP, \fBtako-preview-destroy(1)\fP, \fBtako-preview-list(1)\fP, \fBtako-preview-prune(1)\fP

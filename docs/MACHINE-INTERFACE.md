@@ -237,7 +237,10 @@ per-command fields.
 
 - `operation` is `deploy`, `rollback`, `promote` or `scale` (`start`/`stop`
   report `scale`). `environment.kind` is `standard` for declared
-  environments; treat unknown kinds (a future `preview`) as opaque.
+  environments and `preview` for preview environments (`tako deploy
+  --preview NAME`), which also carry `environment.preview` (`name`, `base`,
+  and `expiresAt`, absent when the preview never expires). Treat unknown kinds
+  as opaque.
 - `outcome`: `succeeded` (a service changed, nothing failed), `up_to_date`
   (nothing changed), `warmed` (only revisions warmed for manual promotion),
   `partial` (failed, and at least one service is not at its pre-operation
@@ -276,11 +279,17 @@ per-command fields.
   `first deployment; nothing to roll back to`, `deployment history
   unreadable`, ...) and `command`/`argv` are absent. `undo.notes` carries
   caveats such as persistent services being skipped by project rollback.
+  For a preview, every derived command (undo and next steps) selects it with
+  `--preview NAME` instead of `-e`; the undo of a preview's first deploy is
+  `tako preview destroy NAME`, and a redeploy's undo is `tako rollback
+  --preview NAME <displayId>`.
 - `nextSteps[]` (at most 5) each carry a `reason` and a `command`: `tako
   promote` for warmed services, `tako logs --service NAME --since 10m` for
   failed or restored services, `tako domains status` for pending or failed
   domains, `tako ps` for unhealthy or degraded services, `tako history` after
-  a partial failure.
+  a partial failure. Preview summaries omit `tako promote` and `tako domains
+  status` steps (those commands do not accept `--preview`; previews always
+  use automatic promotion) and the `tako domains hosts` note.
 - `notes[]` carries free-text notes: bookkeeping failures after a successful
   rollout, failed lifecycle hooks (`post-deploy hook failed (exit 1)`), the
   `tako domains hosts` hint for internal routes, health-read failures.
@@ -298,6 +307,96 @@ URL details, undo notes, the commit) passes through the secret redactor
 before the summary is emitted in any form. Image references, service,
 environment and project names, URLs and deployment IDs are public values and
 appear unmasked.
+
+### Preview environments
+
+`tako deploy --preview NAME` deploys a short-lived preview environment
+(identity `preview-<name>`, see docs/PREVIEW-ENVIRONMENTS.md). Its
+`DeployResult` carries an additive `preview` object:
+
+```json
+{
+  "preview": {
+    "name": "pr-42",
+    "environment": "preview-pr-42",
+    "base": "preview",
+    "created": true,
+    "expiresAt": "2026-10-18T14:02:00Z",
+    "ttl": "168h",
+    "hosts": { "web": "pr-42.preview.example.com" }
+  }
+}
+```
+
+`created` is true when the deploy created the preview record; `expiresAt` is
+absent for `ttl: none`. `ps`, `logs`, `exec`, `history`, `rollback` and
+`config explain` accept `--preview NAME`; every other command rejects it with
+exit 2. Except for `config explain` (offline), they read the preview record
+first and exit 2 when no record exists or when `-e` names a different base.
+
+`tako preview list` returns a `PreviewList`:
+
+```json
+{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "PreviewList",
+  "project": "shop",
+  "items": [
+    {
+      "apiVersion": "tako.redentor.dev/v1alpha1",
+      "kind": "PreviewRecord",
+      "project": "shop",
+      "environment": "preview-pr-42",
+      "name": "pr-42",
+      "base": "preview",
+      "servers": ["node-a"],
+      "hosts": { "web": "pr-42.preview.example.com" },
+      "createdAt": "2026-10-11T14:02:00Z",
+      "updatedAt": "2026-10-11T14:02:00Z",
+      "expiresAt": "2026-10-18T14:02:00Z",
+      "ttl": "168h",
+      "source": { "branch": "feature/x", "commit": "ab12cd3" },
+      "createdBy": "ci",
+      "status": "active",
+      "nodes": ["node-a"]
+    }
+  ],
+  "nodes": [{ "name": "node-a", "status": "ok" }]
+}
+```
+
+Records are merged across every server in top-level `servers:` by newest
+`updatedAt`; `nodes` on an item lists the servers holding that record.
+`status` is `active` or `expired`. Node `status` is `ok`, `skipped` (the
+node lacks the `preview.lifecycle-v1` takod capability; a warning names it)
+or `failed` (with `error`). Unparseable records are listed in `invalid`.
+
+`tako preview destroy NAME` returns a `PreviewDestroyResult` with `project`,
+`name`, `environment`, `base`, `status` (`destroyed`, `not_found`, `failed`),
+per-server rows `servers[]` (`name`, `status`, `containersRemoved`,
+`networksRemoved`, `volumesRemoved`, `error`), the total `volumesRemoved`,
+`startedAt`, `durationSeconds` and `error`. Each server receives one ordered
+teardown request (proxy files, containers, the preview's exact network,
+volumes labeled with the preview identity, takod state, and the record last).
+Shared images and `/opt/<project>` are never removed. Destroying a preview
+that no server records is `not_found` and exits 0, so the command is
+idempotent; a failed teardown keeps the record, and rerunning retries.
+
+`tako preview prune [--dry-run]` returns a `PreviewPruneResult` with
+`project`, `dryRun`, `destroyed[]`, `skipped[]`, `failed[]` (each `name`,
+`environment`, `base`, `expiresAt`, `reason`), `nodes`, `startedAt`,
+`durationSeconds` and `error`. Only expired previews are touched. A preview
+whose lease is held by another operation is `skipped` and does not change the
+exit code. With `--dry-run`, `destroyed` lists what would be removed and
+nothing is mutated.
+
+`preview destroy` and `preview prune` require `--yes` in machine modes and
+non-interactive runs; without it they emit a `ConfirmationRequired` document
+(`operation`: `preview destroy` or `preview prune`) and exit 2.
+
+Events: `preview.destroyed` (phase `cleanup`) after a successful destroy, and
+`preview.pruned` once per pruned preview. Both carry `data.name`,
+`data.environment` and `data.base`.
 
 ### Rollback
 

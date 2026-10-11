@@ -593,9 +593,10 @@ environments:
 - Chains are allowed (`staging -> production -> base`) up to 8 `extends`
   hops. A cycle (including `extends` naming itself), an unknown parent, or a
   chain deeper than 8 hops fails validation with the full chain in the error.
-- `extends` and `abstract` are not inherited. Abstract environments do not
-  need `servers` or `serverSelector`. An abstract environment that nothing
-  extends produces a `tako validate` warning.
+- `extends`, `abstract` and `preview` are not inherited. Abstract
+  environments do not need `servers` or `serverSelector`. An abstract
+  environment that nothing extends produces a `tako validate` warning, unless
+  it declares `preview:` (see [Preview Environments](#preview-environments)).
 - An unknown or mistyped field is reported against the environment that
   declared it, and validation errors in an inheriting environment end with
   the chain, for example `(environment staging extends production)`.
@@ -612,6 +613,58 @@ Without `-e`, Tako uses the only deployable (non-abstract) environment, else
 `production`, else the first environment name in alphabetical order. In that
 last case it prints `no -e and no 'production'; using '<name>'; pass -e` to
 stderr, so pass `-e` in scripts and CI.
+
+### Preview environments
+
+A `preview:` block makes an environment the base of short-lived preview
+environments. `tako deploy --preview pr-42` synthesizes `preview-pr-42`, which
+extends the base, and deploys it. The usual base is an abstract template:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        image: ghcr.io/example/app:1.4.2
+        port: 3000
+        replicas: 2
+        proxy:
+          domain: app.example.com
+  preview:
+    abstract: true
+    extends: production
+    preview:
+      domain: "{name}.preview.example.com"
+      ttl: 72h
+      max: 5
+      maxReplicas: 1
+      keepJobs: false
+      env:
+        PUBLIC_URL: "{url:web}"
+      services:
+        web:
+          env:
+            PREVIEW_HOST: "{host:web}"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `domain` | `{name}.{domain}` | Host template for proxied services. Placeholders: `{name}` (preview name), `{service}` (service name), `{domain}` (the service's own domain, or internal `host`). |
+| `ttl` | `168h` | Go duration or `none`; the preview expires this long after its last successful deploy. |
+| `max` | `5` | Previews this base may have at once. |
+| `maxReplicas` | `1` | Replica cap for every service except global placement. |
+| `keepJobs` | `false` | Keep `kind: job` services, which are dropped by default. |
+| `env` | | Merged into every service. Placeholders: `{name}`, `{host:<service>}`, `{url:<service>}`. |
+| `services.<name>.env` | | Merged into one service, with the same placeholders. |
+
+`preview` is not inherited: an environment that extends a base is not itself
+a base. Preview services must not publish host ports, use `imports`,
+bind-mount host paths, or mount `name`/`external`/driver volumes; `tako
+validate` warns about these and a preview deploy rejects them. A preview reads
+the secrets files of its base (`.tako/secrets.preview` above). See
+[PREVIEW-ENVIRONMENTS.md](./PREVIEW-ENVIRONMENTS.md) for DNS, certificates,
+TTL and pruning.
 
 ## Background Workers
 
