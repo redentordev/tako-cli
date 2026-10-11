@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -69,7 +70,7 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 		}
 		exportAlertOwnerPresence(os.Stdout, cfg.Project.Name, envName, len(owners) > 0)
 	}
-	alertMetadata, monitorMetadata := true, true
+	alertMetadata, monitorMetadata, nodeMetadata := true, true, true
 	for _, result := range collectPrometheusNodes(cfg, envName, servers, factory) {
 		if alertOwners[result.serverName] {
 			exportAlertMetrics(os.Stdout, result.serverName, result.host, cfg.Project.Name, envName, result.alertStatus, result.alertsRead, alertMetadata)
@@ -83,6 +84,9 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		exportSystemMetrics(result.serverName, result.host, result.metrics)
+		if exportNodeMetrics(os.Stdout, result.serverName, result.metrics, nodeMetadata) {
+			nodeMetadata = false
+		}
 		if len(result.stats) > 0 {
 			exportContainerMetrics(result.serverName, result.host, result.stats)
 		}
@@ -275,6 +279,24 @@ func exportSystemMetrics(serverName, serverHost string, metrics *MetricsData) {
 	fmt.Printf("# TYPE tako_uptime_seconds counter\n")
 	fmt.Printf("tako_uptime_seconds%s %d\n", labels, metrics.UptimeSeconds)
 	fmt.Println()
+}
+
+// exportNodeMetrics writes the node-local series (I/O counters, Docker
+// filesystem usage, node conditions, OS updates, reboot and clock state).
+// Legacy-agent nodes without node status emit none of them. It reports
+// whether anything was written so HELP/TYPE lines are emitted once.
+func exportNodeMetrics(out io.Writer, serverName string, metrics *MetricsData, includeMetadata bool) bool {
+	if metrics == nil {
+		return false
+	}
+	var buffer bytes.Buffer
+	takod.WriteNodePrometheus(&buffer, takod.NodePrometheusInputFromDocument(serverName, metrics.nativeDocument, metrics.Status), includeMetadata)
+	if buffer.Len() == 0 {
+		return false
+	}
+	buffer.WriteString("\n")
+	_, _ = out.Write(buffer.Bytes())
+	return true
 }
 
 func schedulerAlertsConfigured(cfg *config.Config) bool {

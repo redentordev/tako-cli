@@ -52,6 +52,7 @@ type Server struct {
 	alertManager                       *AlertManager
 	sourceAlerts                       *SourceAlertManager
 	hostSamples                        HostSampleSource
+	statusHistory                      *statusHistory
 	containerSampler                   *containerAlertSampler
 	certificateScheduler               *CertificateScheduler
 	uploadReadTimeout                  time.Duration
@@ -235,6 +236,9 @@ type ServerOptions struct {
 	// legacy current.json adapter is used; the native collector of
 	// add-server-status-history plugs in here.
 	HostSampleSource HostSampleSource
+	// Metrics configures native host metrics collection and history
+	// (add-server-status-history); a zero Interval keeps the legacy path.
+	Metrics MetricsOptions
 }
 
 func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
@@ -309,6 +313,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 	server.backupScheduler.admit = func(...string) error { return server.checkFreeDisk(0, backupRootDir) }
 	server.jobScheduler.admit = func(...string) error { return server.checkFreeDisk(0, server.dataDir, server.dockerDataRoot) }
 	server.certificateScheduler.admit = func(paths ...string) error { return server.checkFreeDisk(0, paths...) }
+	server.initStatusHistory(opts.Metrics, opts.HostSampleSource == nil)
 	return server
 }
 
@@ -458,6 +463,7 @@ func (s *Server) Run(ctx context.Context) error {
 	start(func() { s.alertManager.Run(runCtx) })
 	start(func() { s.certificateScheduler.Run(runCtx) })
 	s.startHealthMonitoring(runCtx, start)
+	s.startStatusHistory(runCtx, start)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -2662,7 +2668,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		collect = parsed
 	}
 
-	response, err := ReadNodeMetrics(r.Context(), collect)
+	response, err := s.readMetricsResponse(r.Context(), collect)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -2755,6 +2761,7 @@ func (s *Server) Status() Status {
 		status.Capabilities = append(status.Capabilities, CapabilityBackupPostgresVerifyV1)
 	}
 	status.Capabilities = append(status.Capabilities, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1)
+	status.Capabilities = append(status.Capabilities, s.statusHistoryCapabilities()...)
 	if s.installation != nil {
 		status.Capabilities = append(status.Capabilities, CapabilityPlatformWorkerHandoffV1)
 		if inventory, err := nodeidentity.ReadInventory(s.inventoryFile); err == nil && inventory.ClusterID == s.installation.ClusterID {

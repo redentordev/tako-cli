@@ -2629,3 +2629,24 @@ tako takod run --build-cache-prune-interval 24h --build-cache-keep-storage 20GB
 
 Set `--build-cache-prune-interval 0` to disable the scheduled prune, or lower
 `--build-cache-keep-storage` on small VPS disks.
+
+## Host Metrics Collection
+
+takod samples host metrics natively and keeps a bounded on-node history for
+`tako metrics --since`. These are `takod run` flags with defaults, so
+`tako.yaml` needs no setting:
+
+```bash
+tako takod run --metrics-interval 60s --metrics-retention 168h --metrics-history-max-bytes 67108864
+```
+
+- `--metrics-interval` (default `60s`, minimum `5s`): `0` disables native
+  collection and history; takod then serves the legacy agent file if present.
+- `--metrics-retention` (default `168h`, `1h`–`744h`): history kept under
+  `/var/lib/tako/metrics/history/`.
+- `--metrics-history-max-bytes` (default 64 MiB): hard cap, oldest files first.
+- `--metrics-textfile-dir` (off): write `tako_node.prom` atomically after each
+  sample for node_exporter's textfile collector. takod never opens a network
+  listener.
+
+See [Resource Monitoring](RESOURCE-MONITORING.md).

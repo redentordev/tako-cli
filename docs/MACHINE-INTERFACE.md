@@ -623,7 +623,10 @@ still emits the document. `tako metrics --output json` (single-shot;
 `--live` is rejected in machine modes) returns a `MetricsResult` with
 project/environment, the `--server` filter when set, `collectedAt`, and
 per-node samples where `metrics` carries the takod `/v1/metrics` document
-verbatim (monitoring-agent schema) or `error` says why the read failed. The
+verbatim (legacy agent schema; native nodes add `source: "takod"`,
+`interval_seconds`, `cpu_count`, `docker_disk`, `disk.inodes_percent`, and
+`network`/`disk_io` rates and totals), an additive `status` with the node
+status document when the node provides one, or `error` says why the read failed. The
 takod response also has an additive `alerts` array. Each credential-free alert
 scope contains `project`, `environment`, `configured`, `evaluatedAt`, aggregate
 active/pending/exhausted counts, subject counters and timestamps, and bounded
@@ -642,6 +645,39 @@ represented as a node-down event; only the external observer emits reachability
 member is currently schedulable; system and container metrics are still
 collected from the configured nodes. All nodes failing exits 1, a partial read
 exits 6, both still emit the document.
+
+`tako metrics --since <duration|RFC3339> [--step <duration>] --output json`
+returns a `MetricsHistoryResult` with `apiVersion`, `kind`, `project`,
+`environment`, the `server` filter when set, the requested `since` and `step`
+(`7d` is normalized to `168h`; `step` is omitted when takod picks it), `nodes`
+(`server`, `host`, and either `history` or `error`) and `error`. `history` is the
+takod `GET /v1/metrics/history?since=&until=&step=` document verbatim:
+`node`, `intervalSeconds`, `retentionSeconds`, `from`, `to`, `step`,
+`stepSeconds`, `truncated` (window clamped to retention), `buckets`
+(`t`, `n`, `cpu`/`mem`/`disk`/`dockerDisk`/`load1` as `{min, avg, max}`,
+`rxRate`/`txRate`/`readRate`/`writeRate` in bytes per second as `{avg, max}`),
+`last` (newest sample), `gaps` (`from`, `to`; more than three intervals
+without samples) and `boots`. takod picks at most 360 buckets by default and
+rejects (HTTP 400) a step below the sampling interval or more than 1440
+buckets. History requires the `node.metrics-history-v1` capability, which
+takod advertises only while native collection is on (`--metrics-interval` >
+0); a node without it gets an `error` naming `tako upgrade servers`.
+`--since` with `--live` or `--once` exits 2; all nodes failing exits 1 and a
+partial read exits 6, both still emitting the document.
+
+`GET /v1/node/status` (capability `node.status-v1`) returns `node`,
+`evaluatedAt`, `os` (`packageManager`, `pendingUpdates`, `securityUpdates`,
+`securityPackages`, `listsAgeSeconds`, `rebootRequired`,
+`rebootRequiredSince`, `rebootPackages`, `checkedAt`, `stale`) and
+`conditions` (`type` of `os-updates`, `reboot-required`, `clock-sync`,
+`docker-daemon` or `metrics-collector`; `status` of `ok`, `warn`, `fail` or
+`unknown`; `reason`, `detail`, `since`, `checkedAt`, `stale`). The same
+document is the additive `status` of `GET /v1/metrics`. Conditions are reported
+only; Tako never installs updates or reboots a node. Node-scoped alerts of kind
+`node` (`reboot_required`, `security_updates_pending`, `clock_unsynchronized`,
+`docker_unreachable`) are published through the monitoring alert sources.
+`DoctorResult` adds node-status checks under `Node Agent Health`; nodes without
+`node.status-v1` report them as `skip` with remediation `tako upgrade servers`.
 
 On nodes advertising `monitoring.health-v1`, the `/v1/alerts` response has
 an additive `sources` object. It contains `evaluatedAt`, `subjects` (`kind`,
@@ -775,12 +811,14 @@ node and credential-free artifact, digest, query-hash, cleanup, and verification
 evidence. `tako setup`
 returns a `SetupResult` with per-node provisioning outcomes: `mode`
 (`fresh`, `reapply`, or `converge` — converge re-runs only firewall,
-deploy access, and the takod runtime and reports the untouched steps as
+deploy access, the takod runtime, and legacy-agent removal and reports the
+untouched steps as
 `skipped`), per-step outcomes keyed by stable step names (`os-check`,
 `packages`, `docker`, `wireguard`, `firewall`, `hardening`,
-`auto-recovery`, `deploy-user`, `monitor-agent`, `takod-install`,
-`takod-service`), the detected `os`, installed `dockerVersion` and
-`takodVersion`, the applied `firewallPorts`, a `firewall` report, and the
+`auto-recovery`, `deploy-user`, `takod-install`, `takod-service`,
+`monitor-agent`; `monitor-agent` removes the legacy bash agent once takod
+advertises `node.metrics-history-v1` and runs in every mode, including
+converge), the detected `os`, installed `dockerVersion` and `takodVersion`, the applied `firewallPorts`, a `firewall` report, and the
 node's recorded SSH `hostKey` (`type`, base64 `key`, SHA256 `fingerprint`)
 so callers can pin it for `--host-key-mode strict`. `firewall` carries
 `backend` (`ufw` or `none`), `status` (`configured` or `skipped`), the skip

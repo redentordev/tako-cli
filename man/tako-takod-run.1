@@ -50,6 +50,22 @@ Run the takod Unix-socket server
 	Protected controller membership state (derived from data-dir when omitted)
 
 .PP
+\fB--metrics-history-max-bytes\fP=67108864
+	Cap on-node metrics history at this many bytes (oldest files are deleted first)
+
+.PP
+\fB--metrics-interval\fP=1m0s
+	Collect host metrics natively at this interval (0 disables and reads the legacy agent file)
+
+.PP
+\fB--metrics-retention\fP=168h0m0s
+	Keep on-node metrics history this long (1h to 744h)
+
+.PP
+\fB--metrics-textfile-dir\fP=""
+	Write tako_node.prom here after each sample for node_exporter's textfile collector (off by default)
+
+.PP
 \fB--minimum-free-disk-bytes\fP=10737418240
 	Reject disk-growing operations below this free-disk floor (0 disables)
 
