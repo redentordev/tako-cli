@@ -390,7 +390,11 @@ func TestCleanupOldProjectImagesExcludesComposeOwnedImages(t *testing.T) {
 		"tako-old\tdemo/web\told",
 	}, "\n")+"\n")
 
-	removed, err := cleanupOldProjectImages(context.Background(), "demo", 1, []string{"demo/web"})
+	dataDir := t.TempDir()
+	writeImageCleanupDeployment(t, dataDir, "demo", "production", "d1", map[string]string{"web": "demo/web:old"})
+	writeImageCleanupDeployment(t, dataDir, "demo", "production", "d2", map[string]string{"web": "demo/web:new"})
+
+	removed, err := cleanupOldProjectImages(context.Background(), dataDir, "demo", "production", 1, []string{"demo/web"})
 	if err != nil {
 		t.Fatalf("cleanupOldProjectImages returned error: %v", err)
 	}
@@ -402,7 +406,7 @@ func TestCleanupOldProjectImagesExcludesComposeOwnedImages(t *testing.T) {
 	if !slices.Contains(entries, listWant) {
 		t.Fatalf("docker log missing Compose exclusion %q in %#v", listWant, entries)
 	}
-	if !slices.Contains(entries, "docker rmi -f demo/web:old") {
+	if !slices.Contains(entries, "docker rmi tako-old") {
 		t.Fatalf("docker log missing Tako image removal in %#v", entries)
 	}
 	for _, entry := range entries {
