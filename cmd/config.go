@@ -35,7 +35,7 @@ func init() {
 
 func runConfigExplain(cmd *cobra.Command, args []string) error {
 	configPath := resolveDeployConfigPath(cfgFile)
-	cfg, err := loadDeployConfig(cfgFile)
+	cfg, err := loadSelectedEnvironmentConfig(cfgFile)
 	if err != nil {
 		return err
 	}

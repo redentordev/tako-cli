@@ -613,6 +613,47 @@ Without `-e`, Tako uses the only deployable (non-abstract) environment, else
 last case it prints `no -e and no 'production'; using '<name>'; pass -e` to
 stderr, so pass `-e` in scripts and CI.
 
+### Environment variables and `-e`
+
+`${VAR}` references are expanded from the process environment and the `.env`
+file next to the config. Unset variables are an error, but which ones count
+depends on whether the command was given `-e`:
+
+- `tako validate`, `tako deploy`, and `tako config explain` with `-e <env>`
+  require only the variables used by the parts of the config that environment
+  can reach:
+  - every top-level section (`project`, `registries`, `secretSources`,
+    `notifications`, `volumes`, `builds`, `hooks`, `runtime`, `state`, `mesh`,
+    ...)
+  - the selected environment and every environment it `extends`, including
+    concrete parents, all of whose values are required
+  - the servers it can use: the servers listed in its (or an inherited)
+    `servers`, `proxy.placement.servers`, and service `placement.servers`
+  - any `x-` fragment or anchor it uses through a YAML alias, even one
+    declared inside another environment
+- When the selected environment uses `serverSelector`, has no `servers` list,
+  or any server is an enrolled platform node (`clusterId`/`nodeId`), every
+  server is in scope and every server's variables are required.
+- A variable used only by other environments, unused `x-` fragments, or
+  servers outside that scope may be unset. The command then leaves every
+  other environment, and each out-of-scope server it could not expand, out of
+  the loaded config, so their unexpanded values are never used and those
+  servers are never contacted. `tako validate -e <env>`
+  names the skipped variables in a warning; `tako deploy -v` prints them.
+- When every variable is set, nothing is left out: `-e` only changes the
+  outcome for a config that would otherwise fail to expand.
+- Without `-e` (including the default-environment pick), and for every other
+  command (for example `tako setup`, `tako upgrade servers`, and `tako doctor`),
+  every variable in the file is required. Run `tako validate` without `-e` to
+  check all environments at once.
+
+A CI job for one environment therefore only needs that environment's
+variables:
+
+```bash
+TAKO_PREVIEW_HOST=203.0.113.10 tako validate -e preview
+```
+
 ## Background Workers
 
 <!-- tako:snippet partial -->
