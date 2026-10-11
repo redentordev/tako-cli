@@ -165,6 +165,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
+	e.attachRegistryMinter(deploy)
 	priorDesired, priorAssignments, err := LoadPriorPlacementState(sourceClient, cfg, envName)
 	if err != nil {
 		return nil, err
@@ -181,6 +182,12 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
+		return nil, err
+	}
+	// Promotion activates an image that is already on the nodes (exact
+	// transfer, no pull or build), so it attaches no provider credential and
+	// the preflight runs no provider CLI.
+	if err := preflightRegistryAuth(ctx, deploy, deployer.RegistryAuthNeeds{}); err != nil {
 		return nil, err
 	}
 	if err := preflightAndSetupTakodRuntime(deploy, services, map[string]config.ServiceConfig{serviceName: services[serviceName]}); err != nil {

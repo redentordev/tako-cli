@@ -119,6 +119,7 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 		imageRefs[name] = service.Image
 	}
 	deploy := deployer.NewDeployerWithPool(controllerClient, cfg, environment, pool, req.Verbose)
+	e.attachRegistryMinter(deploy)
 	deploy.SetRuntimeFactory(factory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetPriorAssignments(assignments)
@@ -135,6 +136,11 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 		}
 		movesByService[move.Service] = append(movesByService[move.Service], move)
 		movementServices[move.Service] = service
+	}
+	// Placement movement transfers the exact running image and never pulls
+	// or builds, so it attaches no provider credential and runs no CLI.
+	if err := preflightRegistryAuth(ctx, deploy, deployer.RegistryAuthNeeds{}); err != nil {
+		return nil, err
 	}
 	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
 		return nil, err
