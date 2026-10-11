@@ -40,6 +40,8 @@ var (
 	deployPlanFile        string
 	deployAcceptCluster   string
 	deploySkipHooks       bool
+	deployPreviewTTL      string
+	deployNoPrune         bool
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -84,10 +86,12 @@ func init() {
 	deployCmd.Flags().StringVar(&deployPlanFile, "plan", "", "Path to a reviewed plan document; apply fails if the computed plan drifted from it")
 	deployCmd.Flags().StringVar(&deployAcceptCluster, "accept-cluster", "", "Attach this workspace to the exact detected platform cluster ID")
 	deployCmd.Flags().BoolVar(&deploySkipHooks, "skip-hooks", false, skipHooksFlagUsage)
+	deployCmd.Flags().StringVar(&deployPreviewTTL, "ttl", "", "With --preview: expiry for this deploy only (for example 72h, or none); defaults to the template ttl")
+	deployCmd.Flags().BoolVar(&deployNoPrune, "no-prune", false, "With --preview: skip the opportunistic prune of expired previews")
 }
 
 func loadDeployConfig(configPath string) (*config.Config, error) {
-	cfg, err := config.LoadConfig(configPath)
+	cfg, err := loadOfflinePreviewConfig(configPath)
 	if err != nil {
 		return nil, &engine.InvalidRequestError{Err: formatDeployConfigError(resolveDeployConfigPath(configPath), err)}
 	}
@@ -108,6 +112,9 @@ func resolveDeployConfigPath(configPath string) string {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
+	if !previewRequested() && (deployPreviewTTL != "" || deployNoPrune) {
+		return &engine.InvalidRequestError{Err: fmt.Errorf("--ttl and --no-prune require --preview")}
+	}
 	configPath := resolveDeployConfigPath(cfgFile)
 	cfg, err := loadDeployConfig(cfgFile)
 	if err != nil {
@@ -139,10 +146,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		DomainTimeout:   deployDomainTimeout,
 		DomainTargets:   deployDomainTargets,
 	}
+	if cfg.PreviewInstance() != nil {
+		request.Preview = &engine.DeployPreviewOptions{
+			TTL:          deployPreviewTTL,
+			NoPrune:      deployNoPrune,
+			LoadInstance: previewInstanceLoader(cfgFile),
+		}
+	}
 
 	hookSession, err := newHookSession(hookCommandDeploy, cfg, configPath, deploySkipHooks)
 	if err != nil {
 		return err
+	}
+	if instance := cfg.PreviewInstance(); instance != nil && deployPreviewTTL != "" {
+		hookSession.setPreviewExpiry(previewExpiryEstimate(deployPreviewTTL))
 	}
 
 	session, err := planDeploy(cmd.Context(), request)
@@ -195,6 +212,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Post hooks run after the lock and leases are released so a slow smoke
 	// test does not block other operators.
 	session.Close()
+	if result != nil && result.Preview != nil {
+		expiresAt := ""
+		if result.Preview.ExpiresAt != nil {
+			expiresAt = result.Preview.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		hookSession.setPreviewExpiry(expiresAt)
+	}
 	err = hookSession.finish(cmd.Context(), err, func() hooks.Context {
 		values := planContext
 		if result != nil {

@@ -107,9 +107,9 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// Load configuration
-	cfg, err := config.LoadConfig(cfgFile)
+	cfg, err := loadCommandConfigOrError(cmd.Context(), cfgFile)
 	if err != nil {
-		return formatConfigLoadError(cfgFile, err)
+		return err
 	}
 	envName := getEnvironmentName(cfg)
 

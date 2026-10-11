@@ -45,6 +45,21 @@ type OperationSummary struct {
 type SummaryEnvironment struct {
 	Name string `json:"name"`
 	Kind string `json:"kind"`
+	// Preview describes the preview instance when Kind is "preview".
+	Preview *SummaryPreview `json:"preview,omitempty"`
+}
+
+// SummaryPreview identifies a preview instance in a summary.
+type SummaryPreview struct {
+	Name string `json:"name"`
+	Base string `json:"base"`
+	// ExpiresAt is empty for a preview with ttl none.
+	ExpiresAt string `json:"expiresAt,omitempty"`
+}
+
+// isPreview reports whether the summary's environment is a preview instance.
+func (env SummaryEnvironment) isPreview() bool {
+	return env.Kind == SummaryEnvironmentKindPreview && env.Preview != nil && env.Preview.Name != ""
 }
 
 // SummaryService is one service row of an OperationSummary.
@@ -162,6 +177,10 @@ const (
 // under `environments:`.
 const SummaryEnvironmentKindStandard = "standard"
 
+// SummaryEnvironmentKindPreview is the kind of a preview instance created by
+// `tako deploy --preview <name>`.
+const SummaryEnvironmentKindPreview = "preview"
+
 // Undo unavailability reasons.
 const (
 	UndoUnavailableNothingChanged = "nothing changed"
@@ -205,7 +224,38 @@ func (e *Engine) newSummaryBuilder(operation string, project string, environment
 	if e != nil {
 		redact = e.RedactSensitive
 	}
-	return newSummaryBuilder(redact, operation, project, environment, startedAt)
+	builder := newSummaryBuilder(redact, operation, project, environment, startedAt)
+	if preview := e.summaryPreviewFor(environment); preview != nil {
+		builder.setPreview(preview)
+	}
+	return builder
+}
+
+// RegisterPreviewEnvironment marks identity as a preview instance for every
+// summary built afterwards, so derived commands use --preview <name>.
+func (e *Engine) RegisterPreviewEnvironment(identity string, preview SummaryPreview) {
+	if e == nil || identity == "" || preview.Name == "" {
+		return
+	}
+	e.summaryPreviewsMu.Lock()
+	defer e.summaryPreviewsMu.Unlock()
+	if e.summaryPreviews == nil {
+		e.summaryPreviews = map[string]SummaryPreview{}
+	}
+	e.summaryPreviews[identity] = preview
+}
+
+func (e *Engine) summaryPreviewFor(environment string) *SummaryPreview {
+	if e == nil {
+		return nil
+	}
+	e.summaryPreviewsMu.Lock()
+	defer e.summaryPreviewsMu.Unlock()
+	preview, ok := e.summaryPreviews[environment]
+	if !ok {
+		return nil
+	}
+	return &preview
 }
 
 func newSummaryBuilder(redact func(string) string, operation string, project string, environment string, startedAt time.Time) *summaryBuilder {
@@ -286,6 +336,16 @@ func (b *summaryBuilder) setUndo(undo *SummaryUndo) {
 
 func (b *summaryBuilder) environment() SummaryEnvironment {
 	return b.summary.Environment
+}
+
+// setPreview marks the summary's environment as a preview instance.
+func (b *summaryBuilder) setPreview(preview *SummaryPreview) {
+	if preview == nil || preview.Name == "" {
+		return
+	}
+	copied := *preview
+	b.summary.Environment.Kind = SummaryEnvironmentKindPreview
+	b.summary.Environment.Preview = &copied
 }
 
 // outcome derives the outcome from the rows and the failure flag (D9).
@@ -431,8 +491,11 @@ func summaryNextSteps(summary OperationSummary, extra []SummaryNextStep) []Summa
 		seen[command] = true
 		steps = append(steps, SummaryNextStep{Reason: reason, Command: command})
 	}
+	// promote and domains status take no --preview selector, so a preview's
+	// summary never suggests them.
+	preview := env.isPreview()
 	for _, row := range summary.Services {
-		if row.Change == SummaryChangeWarmed {
+		if row.Change == SummaryChangeWarmed && !preview {
 			add(fmt.Sprintf("%s is warmed for manual promotion", row.Name), append([]string{"tako", "promote", row.Name}, summaryEnvironmentArgs(env)...))
 		}
 	}
@@ -445,7 +508,7 @@ func summaryNextSteps(summary OperationSummary, extra []SummaryNextStep) []Summa
 		}
 	}
 	for _, url := range summary.URLs {
-		if url.Status != SummaryURLPending && url.Status != SummaryURLFailed {
+		if preview || (url.Status != SummaryURLPending && url.Status != SummaryURLFailed) {
 			continue
 		}
 		domain := summaryURLHost(url.URL)
@@ -489,9 +552,12 @@ func summaryURLHost(url string) string {
 }
 
 // summaryEnvironmentArgs selects the operation's environment explicitly in
-// every command the summary derives. It is the single place a preview
-// environment would swap `-e <env>` for its own selector.
+// every command the summary derives. A preview instance is selected with
+// `--preview <name>`, never with `-e preview-<name>`.
 func summaryEnvironmentArgs(env SummaryEnvironment) []string {
+	if env.isPreview() {
+		return []string{"--preview", env.Preview.Name}
+	}
 	return []string{"-e", env.Name}
 }
 
@@ -519,6 +585,11 @@ func undoForDeploy(env SummaryEnvironment, outcome string, previous *remotestate
 		return unavailableUndo(UndoUnavailableHistory)
 	}
 	if previous == nil || previous.ID == "" {
+		if env.isPreview() {
+			// A preview with no earlier stable deployment is undone by
+			// destroying it.
+			return newUndo([]string{"tako", "preview", "destroy", env.Preview.Name}, "")
+		}
 		return unavailableUndo(UndoUnavailableFirstDeploy)
 	}
 	argv := append(append([]string{"tako", "rollback"}, summaryEnvironmentArgs(env)...), remotestate.FormatDeploymentID(previous.ID))

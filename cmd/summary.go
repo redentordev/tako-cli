@@ -147,6 +147,23 @@ func summaryMeta(summary *engine.OperationSummary) []string {
 	return meta
 }
 
+// summaryPreviewLine is the human line for a preview instance, for example
+// "Preview pr-42 (from preview) · expires 2026-10-18 14:02 UTC".
+func summaryPreviewLine(summary *engine.OperationSummary) string {
+	preview := summary.Environment.Preview
+	if summary.Environment.Kind != engine.SummaryEnvironmentKindPreview || preview == nil {
+		return ""
+	}
+	line := fmt.Sprintf("Preview %s (from %s)", preview.Name, preview.Base)
+	if preview.ExpiresAt == "" {
+		return line + " · no expiry"
+	}
+	if expires, err := time.Parse(time.RFC3339, preview.ExpiresAt); err == nil {
+		return line + " · expires " + expires.UTC().Format("2006-01-02 15:04 UTC")
+	}
+	return line + " · expires " + preview.ExpiresAt
+}
+
 func formatSummaryDuration(seconds float64) string {
 	if seconds <= 0 {
 		return "0s"
@@ -264,6 +281,9 @@ func renderSummaryText(summary *engine.OperationSummary, color bool) string {
 		header += " " + strings.Join(summaryMeta(summary), " · ")
 	}
 	fmt.Fprintf(&out, " %s %s\n", paint(iconColor, icon), paint(ansiBold, header))
+	if line := summaryPreviewLine(summary); line != "" {
+		fmt.Fprintf(&out, " %s\n", line)
+	}
 	out.WriteString(rule + "\n")
 
 	if len(summary.Services) > 0 {

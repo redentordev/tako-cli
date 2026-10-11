@@ -50,6 +50,10 @@ type DeployRequest struct {
 	StrictDomains   bool
 	DomainTimeout   time.Duration
 	DomainTargets   []string
+
+	// Preview carries the `deploy --preview` flags. Config must then be
+	// loaded for the preview instance and Environment be its identity.
+	Preview *DeployPreviewOptions
 }
 
 // GitInfo captures the source commit recorded with a deployment.
@@ -242,6 +246,9 @@ type DeployResult struct {
 	Hooks []HookOutcome `json:"hooks,omitempty"`
 	// Summary is the end-of-operation summary (additive).
 	Summary *OperationSummary `json:"summary,omitempty"`
+	// Preview describes the preview instance of a `deploy --preview` run
+	// (additive).
+	Preview *DeployPreviewResult `json:"preview,omitempty"`
 }
 
 // Hook outcome statuses carried in HookOutcome.Status.

@@ -163,6 +163,14 @@ const (
 	TypeHookFailed    = "hook.failed"
 	TypeHookSkipped   = "hook.skipped"
 
+	// Preview lifecycle events. preview.destroyed is emitted once per preview
+	// torn down by `tako preview destroy`; preview.pruned once per expired
+	// preview destroyed by `tako preview prune` or by the opportunistic
+	// prune of `tako deploy --preview`. Both carry `data.name`,
+	// `data.environment` and `data.base`.
+	TypePreviewDestroyed = "preview.destroyed"
+	TypePreviewPruned    = "preview.pruned"
+
 	TypeWarning = "warning"
 
 	// TypeOperationSummary carries the end-of-operation summary for deploy,

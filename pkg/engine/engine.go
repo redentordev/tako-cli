@@ -33,6 +33,13 @@ type Engine struct {
 	logsHooks *logsHooks
 	// summaryHealthRead substitutes the post-operation health read in tests.
 	summaryHealthRead func(ctx context.Context, cfg *config.Config, envName string, selected []string, services map[string]config.ServiceConfig) (map[string]serviceHealth, error)
+	// previewRuntimeOverride substitutes node access for preview operations
+	// in tests.
+	previewRuntimeOverride func(cfg *config.Config) (*previewRuntime, error)
+	// summaryPreviews maps a preview identity to its summary description, so
+	// every summary of that environment selects it with --preview.
+	summaryPreviewsMu sync.Mutex
+	summaryPreviews   map[string]SummaryPreview
 }
 
 type redactingWriter struct {

@@ -55,6 +55,17 @@ type Context struct {
 	ErrorClass      string
 	Error           string
 	FailedHook      Name
+
+	// Preview is set for preview runs only.
+	Preview *PreviewContext
+}
+
+// PreviewContext is rendered as TAKO_PREVIEW_NAME, TAKO_PREVIEW_BASE and
+// TAKO_PREVIEW_EXPIRES_AT (empty when the preview never expires).
+type PreviewContext struct {
+	Name      string
+	Base      string
+	ExpiresAt string
 }
 
 // Vars renders the context as TAKO_* variables.
@@ -97,6 +108,11 @@ func (c Context) Vars() map[string]string {
 		if value != "" {
 			vars[key] = value
 		}
+	}
+	if c.Preview != nil {
+		vars["TAKO_PREVIEW_NAME"] = c.Preview.Name
+		vars["TAKO_PREVIEW_BASE"] = c.Preview.Base
+		vars["TAKO_PREVIEW_EXPIRES_AT"] = c.Preview.ExpiresAt
 	}
 	return vars
 }

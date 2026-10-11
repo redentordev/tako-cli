@@ -58,6 +58,9 @@ type deploySummaryInput struct {
 	Health     map[string]serviceHealth
 	HealthErr  error
 	HealthRead bool
+
+	// Preview is set for a `deploy --preview` run.
+	Preview *SummaryPreview
 }
 
 // deployNeedsHealth reports whether the deploy attempted any mutation, which
@@ -80,6 +83,7 @@ func buildDeploySummary(redact func(string) string, in deploySummaryInput) *Oper
 	builder.setRecord(in.DeploymentID)
 	builder.setDuration(in.Duration)
 	builder.setRevision(in.Revision, in.Commit)
+	builder.setPreview(in.Preview)
 
 	planChanges := map[string]reconcile.ChangeType{}
 	var removals []string
@@ -214,7 +218,12 @@ func buildDeploySummary(redact func(string) string, in deploySummaryInput) *Oper
 		builder.addService(row)
 	}
 
-	urls, urlNotes := deploySummaryURLs(in.Environment, in.Services, in.DomainChecked, in.StrictDomains, in.DomainStatuses)
+	hintEnvironment := in.Environment
+	if builder.environment().isPreview() {
+		// `domains hosts` takes no --preview selector.
+		hintEnvironment = ""
+	}
+	urls, urlNotes := deploySummaryURLs(hintEnvironment, in.Services, in.DomainChecked, in.StrictDomains, in.DomainStatuses)
 	for _, url := range urls {
 		builder.addURL(url)
 	}
@@ -282,7 +291,7 @@ func deploySummaryURLs(envName string, services map[string]config.ServiceConfig,
 		}
 	}
 	sortSummaryURLs(urls)
-	if hasInternal {
+	if hasInternal && envName != "" {
 		notes = append(notes, fmt.Sprintf("Run `tako domains hosts -e %s` to print /etc/hosts entries for internal routes.", envName))
 	}
 	return urls, notes
@@ -357,6 +366,7 @@ func (s *DeploySession) finishSummary(ctx context.Context, result *DeployResult,
 	if state == nil {
 		state = &deployApplyState{}
 	}
+	result.Preview = s.previewResult()
 	failed := opErr != nil && Classify(opErr) != ClassAttention
 	in := deploySummaryInput{
 		Project:          s.cfg.Project.Name,
@@ -382,6 +392,7 @@ func (s *DeploySession) finishSummary(ctx context.Context, result *DeployResult,
 		DomainChecked:    state.domainChecked,
 		StrictDomains:    s.req.StrictDomains,
 		DomainStatuses:   state.domainStatuses,
+		Preview:          s.summaryPreview(),
 	}
 	if failed {
 		in.Error = result.Error

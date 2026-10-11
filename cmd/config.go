@@ -84,6 +84,9 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Effective config: %s\n", filepath.Clean(configPath))
+	if instance := cfg.PreviewInstance(); instance != nil {
+		fmt.Fprintf(out, "Preview: %s (from %s, ttl %s, max %d)\n", instance.Name, instance.Base, instance.Policy.EffectiveTTL(), instance.Policy.EffectiveMax())
+	}
 	if len(chain) > 0 {
 		fmt.Fprintf(out, "Environment: %s (extends %s)\n\n", envName, strings.Join(chain, " -> "))
 	} else {
@@ -178,7 +181,17 @@ func loadRawConfigForExplain(configPath string) (*takoconfig.Config, error) {
 	// The raw (unexpanded) document goes through the same resolver as
 	// LoadConfig, so explain sees the same flattened environments while
 	// still telling ${VAR} values apart from literal config.
-	return takoconfig.ParseConfigDocument(data, strings.EqualFold(filepath.Ext(configPath), ".json"))
+	isJSON := strings.EqualFold(filepath.Ext(configPath), ".json")
+	if previewRequested() {
+		// --preview explains the instance the next deploy --preview would
+		// produce, offline: the base is -e or the only preview base.
+		// Unexpanded ${VAR} values may not render as preview hosts; the raw
+		// document then only lacks source labels for the instance.
+		if raw, err := takoconfig.ParseConfigDocumentWithOptions(data, isJSON, takoconfig.LoadOptions{Preview: &takoconfig.PreviewInstance{Base: envFlag, Name: previewFlag}}); err == nil {
+			return raw, nil
+		}
+	}
+	return takoconfig.ParseConfigDocument(data, isJSON)
 }
 
 // explainServersSource names the environment that chose the server list

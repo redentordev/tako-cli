@@ -5,7 +5,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/takoapi/ptystream"
 	"github.com/spf13/cobra"
@@ -72,9 +71,9 @@ func init() {
 }
 
 func runExec(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadConfig(cfgFile)
+	cfg, err := loadCommandConfigOrError(cmd.Context(), cfgFile)
 	if err != nil {
-		return formatConfigLoadError(cfgFile, err)
+		return err
 	}
 	if err := requireTakodRuntime(cfg); err != nil {
 		return err

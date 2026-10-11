@@ -72,6 +72,8 @@ type DeploySession struct {
 	// read at plan time.
 	previousStable *remotestate.DeploymentState
 	historyErr     error
+	// preview is set for a `deploy --preview` run.
+	preview *previewDeployState
 
 	archiveDir    string
 	stateLock     *localstate.StateLock
@@ -221,6 +223,12 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 	session.lockInfo = lockInfo
 	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired deployment lock (ID: %s)\n", lockInfo.ID))
+
+	// Preview checks (capability, base, prune, max) run before any build
+	// or mutation.
+	if err := e.preparePreviewDeploy(ctx, session); err != nil {
+		return nil, err
+	}
 
 	// Display source info.
 	if sourceInfo.SourceMode {
@@ -428,6 +436,12 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	})
 	deploy.SetBaseContext(ctx)
 	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired remote deploy authority: %s\n", leaseSet.Summary()))
+
+	// A preview's record exists on every target before the first mutation,
+	// so a failed first deploy stays listable and destroyable (D7).
+	if err := session.writePreviewRecordBeforeMutation(ctx); err != nil {
+		return nil, err
+	}
 
 	if err := preflightAndSetupTakodRuntime(deploy, allServices, services); err != nil {
 		return nil, err
@@ -700,6 +714,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		if err := s.reconcileProxy(services, activeRevisions); err != nil {
 			return nil, fmt.Errorf("failed to reconcile proxy routes: %w", err)
 		}
+		s.refreshPreviewRecord(ctx)
 		e.info(events.TypePlanUpToDate, events.PhaseDeploy, "\n✓ All services are up-to-date. Proxy routes reconciled.\n")
 		result.Status = takoapi.DeploymentStatus(remotestate.StatusSuccess)
 		result.Message = "all services up-to-date; proxy routes reconciled"
@@ -1232,6 +1247,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 
 	e.info(events.TypeLogLine, events.PhaseCleanup, "\n✓ takod deployment completed!\n")
+	s.refreshPreviewRecord(ctx)
 
 	// Automatic cleanup after successful deployment.
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "\n→ Running automatic cleanup...\n")
@@ -1246,12 +1262,14 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		client, _, err := cleanupFactory.Client(ctx, serverName)
 		if err == nil {
 			response, cleanupErr := CleanupViaTakod(client, cfg, takod.CleanupRequest{
-				Project:                cfg.Project.Name,
-				Environment:            envName,
-				ImageRepositories:      imageRepositories,
-				ExternalVolumes:        externalVolumes,
-				KeepImages:             3,
-				CleanOldImages:         true,
+				Project:           cfg.Project.Name,
+				Environment:       envName,
+				ImageRepositories: imageRepositories,
+				ExternalVolumes:   externalVolumes,
+				KeepImages:        3,
+				// Preview image repositories are shared with the base; a
+				// preview never prunes them where a declared env runs.
+				CleanOldImages:         s.cleanOldImagesOn(serverName),
 				CleanStoppedContainers: true,
 				CleanDanglingImages:    true,
 				CleanBuildCache:        true,

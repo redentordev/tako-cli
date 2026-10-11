@@ -144,8 +144,30 @@ func newHookSession(command string, cfg *config.Config, configPath string, skip 
 	if servers, err := cfg.GetEnvironmentServers(envName); err == nil {
 		session.base.Servers = servers
 	}
+	if instance := cfg.PreviewInstance(); instance != nil && instance.Identity == envName {
+		session.base.Preview = &hooks.PreviewContext{Name: instance.Name, Base: instance.Base, ExpiresAt: previewExpiryEstimate(instance.Policy.EffectiveTTL())}
+	}
 	session.registerSecrets(envName)
 	return session, nil
+}
+
+// previewExpiryEstimate is the expiry a successful deploy now would record
+// for ttl, RFC 3339 UTC, or empty for ttl none or an invalid ttl.
+func previewExpiryEstimate(ttl string) string {
+	duration, never, err := config.ParsePreviewTTL(ttl)
+	if err != nil || never {
+		return ""
+	}
+	return time.Now().Add(duration).UTC().Format(time.RFC3339)
+}
+
+// setPreviewExpiry replaces the TAKO_PREVIEW_EXPIRES_AT value of every
+// later hook.
+func (s *hookSession) setPreviewExpiry(expiresAt string) {
+	if s == nil || s.base.Preview == nil {
+		return
+	}
+	s.base.Preview.ExpiresAt = expiresAt
 }
 
 // registerSecrets makes sure hook output and TAKO_ERROR are redacted the
@@ -364,6 +386,10 @@ func hookErrorClass(class engine.Class) string {
 
 // mergeHookContext copies the non-empty fields of values into dst.
 func mergeHookContext(dst *hooks.Context, values hooks.Context) {
+	if values.Preview != nil {
+		preview := *values.Preview
+		dst.Preview = &preview
+	}
 	if len(values.Services) > 0 {
 		dst.Services = values.Services
 	}
