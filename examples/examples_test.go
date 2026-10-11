@@ -339,6 +339,91 @@ func TestGitHubActionsDeploymentPatternIncludesStateWorkflow(t *testing.T) {
 	}
 }
 
+func TestPreviewEnvironmentsExampleSynthesizesIsolatedPreview(t *testing.T) {
+	home := t.TempDir()
+	sshKey := filepath.Join(home, "id_ed25519")
+	if err := os.WriteFile(sshKey, []byte("test-key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SERVER1_HOST", "203.0.113.11")
+	t.Setenv("SERVER2_HOST", "203.0.113.12")
+	t.Setenv("SSH_KEY", sshKey)
+	t.Setenv("LETSENCRYPT_EMAIL", "ops@example.com")
+	t.Setenv("POSTGRES_PASSWORD", "example-password")
+
+	dir, err := filepath.Abs("23-preview-environments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envExample := readExampleFile(t, filepath.Join(dir, ".env.example"))
+	for _, line := range strings.Split(envExample, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, _ := strings.Cut(line, "=")
+		if !strings.HasPrefix(value, "YOUR_") && key != "SSH_KEY" {
+			t.Fatalf(".env.example %s must hold a placeholder, got %q", key, value)
+		}
+	}
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldDir) })
+
+	plain, err := config.LoadConfig("tako.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if bases := plain.PreviewBases(); !slices.Equal(bases, []string{"preview"}) {
+		t.Fatalf("preview bases = %v", bases)
+	}
+	if err := config.ValidateConfig(plain); err != nil {
+		t.Fatalf("ValidateConfig: %v", err)
+	}
+
+	cfg, err := config.LoadConfigWithOptions("tako.yaml", config.LoadOptions{Preview: &config.PreviewInstance{Name: "PR-42"}})
+	if err != nil {
+		t.Fatalf("LoadConfigWithOptions: %v", err)
+	}
+	info := cfg.PreviewInstance()
+	if info == nil || info.Identity != "preview-pr-42" || info.Base != "preview" {
+		t.Fatalf("preview instance = %+v", info)
+	}
+	services, err := cfg.GetServices("preview-pr-42")
+	if err != nil {
+		t.Fatalf("GetServices(preview-pr-42): %v", err)
+	}
+	if _, ok := services["worker"]; ok {
+		t.Fatal("preview kept the worker the template drops")
+	}
+	web := services["web"]
+	if web.Proxy == nil || web.Proxy.Domain != "pr-42.preview.example.com" || !web.Proxy.TLS.Staging {
+		t.Fatalf("preview web proxy = %+v", web.Proxy)
+	}
+	if web.Replicas != 1 {
+		t.Fatalf("preview web replicas = %d, want the maxReplicas cap 1", web.Replicas)
+	}
+	if web.Env["PUBLIC_URL"] != "https://pr-42.preview.example.com" || web.Env["TAKO_PREVIEW_NAME"] != "pr-42" {
+		t.Fatalf("preview web env = %v", web.Env)
+	}
+	if got := cfg.SecretsEnvironment("preview-pr-42"); got != "preview" {
+		t.Fatalf("preview secrets environment = %q, want preview", got)
+	}
+	production := productionServices(t, cfg)
+	if production["web"].Proxy.Domain != "shop.example.com" || production["web"].Replicas != 2 {
+		t.Fatalf("production changed by the preview: %+v", production["web"])
+	}
+	if _, ok := production["worker"]; !ok {
+		t.Fatal("production lost its worker")
+	}
+}
+
 func loadPatternConfig(t *testing.T, configPath string) *config.Config {
 	t.Helper()
 	absPath, err := filepath.Abs(configPath)

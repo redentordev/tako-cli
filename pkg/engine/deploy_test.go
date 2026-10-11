@@ -363,7 +363,16 @@ func TestWorkloadMutationWorkflowsUseGlobalServiceCapabilityPreflight(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(source), "preflightAndSetupTakodRuntime(") {
+			// run is verify-only: it preflights the same capabilities but
+			// never prepares the mesh.
+			want := "preflightAndSetupTakodRuntime("
+			if file == "run.go" {
+				want = "preflightAndVerifyTakodRuntime("
+				if strings.Contains(string(source), "preflightAndSetupTakodRuntime(") || strings.Contains(string(source), "SetupTakodRuntime()") {
+					t.Fatal("run.go must not prepare node metadata or mesh config")
+				}
+			}
+			if !strings.Contains(string(source), want) {
 				t.Fatalf("%s does not globally preflight service capabilities before runtime setup", file)
 			}
 		})
@@ -381,5 +390,22 @@ func TestRunApplyRechecksServiceCapabilitiesBeforeIntent(t *testing.T) {
 	intent := strings.Index(body, "PersistTakodDesiredIntentWithPlacementBaseline")
 	if apply < 0 || preflight < 0 || intent < 0 || !(apply < preflight && preflight < intent) {
 		t.Fatalf("run apply service preflight ordering invalid: apply=%d preflight=%d intent=%d", apply, preflight, intent)
+	}
+}
+
+func TestDeploySessionApplyMarksPreMutationErrors(t *testing.T) {
+	_, err := (&DeploySession{closed: true}).Apply(t.Context())
+	if err == nil || !IsBeforeMutation(err) {
+		t.Fatalf("closed session Apply err = %v, want a before-mutation error", err)
+	}
+	if Classify(err) != ClassFailed {
+		t.Fatalf("class = %d, want the wrapped error's class", Classify(err))
+	}
+	if IsBeforeMutation(fmt.Errorf("reconcile web: boom")) || IsBeforeMutation(nil) {
+		t.Fatal("plain errors are not before-mutation errors")
+	}
+	invalid := beforeMutation(invalidRequestf("bad request"))
+	if Classify(invalid) != ClassInvalid {
+		t.Fatalf("wrapped invalid class = %d", Classify(invalid))
 	}
 }

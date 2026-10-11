@@ -1,0 +1,182 @@
+## ADDED Requirements
+
+### Requirement: Redaction markers name their source
+Every mask produced by the engine redactor SHALL be rendered as `[REDACTED:<label>]`, where `<label>` matches `[A-Za-z0-9_\-@/:.]{1,96}` and is a config-path-like name of the value's origin. A label SHALL begin with a kind: `secrets.`, `env.`, `envFile.`, `servers.`, `registries.`, `environments.`, `services.`, `builds.`, `notifications.`, `hooks.`, `run.`, `export.`, `certs.`, `proxy.` or `pattern.`. Key/value pattern matches SHALL keep the key.
+
+#### Scenario: Aliased secret is labeled by its secret key
+- **WHEN** service `web` declares `secrets: ["API_KEY:STRIPE_KEY"]` and a container log line contains the value of `STRIPE_KEY`
+- **THEN** the `log.line` event shows `[REDACTED:secrets.STRIPE_KEY]` in both `message` and `data.data`
+
+#### Scenario: Misfiring env value is self-explaining
+- **WHEN** a service sets `env: {SESSION_SIGNING_TOKEN: "site"}` and deploy output contains the word `site`
+- **THEN** each masked occurrence reads `[REDACTED:env.SESSION_SIGNING_TOKEN]`
+
+#### Scenario: Pattern match is labeled
+- **WHEN** output contains a JWT that was not registered
+- **THEN** it is replaced with `[REDACTED:pattern.jwt]`
+
+#### Scenario: Assignment keeps its key
+- **WHEN** output contains `password=hunter2hunter2`
+- **THEN** it reads `password=[REDACTED:pattern.assignment]`
+
+### Requirement: Registered values are fully masked under one deterministic label
+A registered value SHALL be fully replaced by its marker, with no characters of the value preserved. When a value is registered under several labels, the rendered label SHALL be chosen by kind precedence with `secrets.` highest, and lexicographically among labels of equal kind, independent of registration order.
+
+#### Scenario: No partial reveal
+- **WHEN** the value `livesecret` is registered as `env.API_SECRET` and appears in output
+- **THEN** the output shows `[REDACTED:env.API_SECRET]` in its place and contains no `***` fragment of the value
+
+#### Scenario: Same value under two labels
+- **WHEN** one value is registered both as `env.DB_PASS` and as `secrets.DB_PASSWORD`, in either order
+- **THEN** every occurrence renders `[REDACTED:secrets.DB_PASSWORD]`
+
+### Requirement: Labels never reveal values or provider locators
+A label SHALL be built only from config names (secret keys, env keys, server, registry, environment and service names) and fixed vocabulary. It SHALL NOT contain a secret value, any part of one, its length, or any `secretSources` locator (provider path, names, vault, project, profile, or map source name).
+
+#### Scenario: Provider locator never appears
+- **WHEN** a secret is resolved from a `secretSources` entry with `path: /prod/app/` and is masked in output
+- **THEN** the marker is `[REDACTED:secrets.<KEY>]` and the output does not contain `/prod/app/`
+
+### Requirement: Labels can be disabled by the operator
+When the environment variable `TAKO_REDACTION_LABELS` is `off`, `0`, `false` or `no` (case-insensitive), every mask SHALL be rendered as the plain `[REDACTED]`, in human and machine output alike. Key/value pattern matches SHALL still keep their key. Masking itself SHALL NOT be disableable.
+
+#### Scenario: Labels off
+- **WHEN** `TAKO_REDACTION_LABELS=off` is set and a registered `secrets.STRIPE_KEY` value appears in a log line
+- **THEN** the `log.line` `message` and `data.data` contain `[REDACTED]` and do not contain `STRIPE_KEY`
+
+### Requirement: Public values never shield a secret
+A registered secret occurrence SHALL be left unmasked only when it lies entirely inside an occurrence of a longer registered public value (a project, environment or service name, image reference or similar). A public value that lies inside, or overlaps, a secret occurrence SHALL NOT prevent the secret from being masked.
+
+#### Scenario: Public name inside a longer secret does not shield it
+- **WHEN** project `acme` is registered as public, `acme-prod-token-9f8e7d6c` is registered as `secrets.API_TOKEN`, and output contains `acme-prod-token-9f8e7d6c`
+- **THEN** the output shows `[REDACTED:secrets.API_TOKEN]` and contains no part of `-prod-token-9f8e7d6c`
+
+#### Scenario: Short secret inside a longer public name
+- **WHEN** service `jardin-cms` is registered as public, `jardin` is registered as `env.SITE_TOKEN`, and output contains `deployed jardin-cms with jardin`
+- **THEN** the output is `deployed jardin-cms with [REDACTED:env.SITE_TOKEN]`
+
+#### Scenario: Public name does not exempt a pattern match
+- **WHEN** service `postgres` is registered as public and output contains `POSTGRES_PASSWORD=postgres`
+- **THEN** the output is `POSTGRES_PASSWORD=[REDACTED:pattern.assignment]`
+
+### Requirement: Redaction is deterministic and idempotent
+Registered values SHALL be replaced longest first, so that overlapping secrets produce the same output on every run. Applying redaction to already-redacted text with the same redactor SHALL NOT change it. Markers this redactor could have produced SHALL NOT be altered by registered values or patterns, whether already present or inserted during redaction.
+
+#### Scenario: Overlapping secrets
+- **WHEN** both `abcd1234` (as `env.A_TOKEN`) and `xxabcd1234yy` (as `env.B_TOKEN`) are registered and output contains `xxabcd1234yy`
+- **THEN** the output is `[REDACTED:env.B_TOKEN]` on every run
+
+#### Scenario: Double redaction
+- **WHEN** an error message that was already passed through `RedactSensitive` is emitted as an event
+- **THEN** the emitted text equals the first redaction result and every marker is intact
+
+#### Scenario: Marker survives the key/value pattern
+- **WHEN** text containing `[REDACTED:secrets.API_KEY]` is redacted again
+- **THEN** the marker is unchanged
+
+#### Scenario: Input cannot forge internal placeholders
+- **WHEN** `shop` is registered as public, `shop-9f8e7d` as `env.API_SECRET`, and output contains `shop ` followed by a NUL byte, `0`, a NUL byte and `-9f8e7d`
+- **THEN** the output equals the input, NUL bytes included, and does not contain `shop-9f8e7d`
+
+#### Scenario: Large input
+- **WHEN** a single 700 KB line contains tens of thousands of secret and public-value occurrences
+- **THEN** redaction completes in time near-linear in the line length, well under one second
+
+### Requirement: Only markers the redactor could have produced are protected
+Marker protection SHALL apply only to the bare `[REDACTED]`, to markers whose label is registered with the same redactor, and to `[REDACTED:pattern.<id>]` for a known pattern ID. Any other text shaped like a marker SHALL be redacted as ordinary text.
+
+#### Scenario: Marker-shaped text does not shield a secret
+- **WHEN** `ghp_abcdefghijklmnop1234` is registered as `secrets.GH_TOKEN` and output contains `[REDACTED:ghp_abcdefghijklmnop1234]`
+- **THEN** the output contains `[REDACTED:[REDACTED:secrets.GH_TOKEN]]` and does not contain `ghp_abcdefghijklmnop1234`
+
+### Requirement: envFile values are registered for redaction
+Every command that registers inline service `env:` values SHALL also register the values loaded from the service's `envFile`/`envFiles`, using the same credential-like rule as inline `env:` values and the label `envFile.<NAME>`. `deploy` and `exec` SHALL ignore a load error here, because building the container env file fails on it. All other commands SHALL emit one `warning` event with `data.reason: "envfile-unreadable"` stating that the file's values will not be redacted, and continue.
+
+#### Scenario: envFile secret masked in logs
+- **WHEN** service `admin` has `envFile: .env.production` containing `SMTP_PASSWORD=pa55w0rd-smtp` and a container log line contains `pa55w0rd-smtp`
+- **THEN** the `log.line` event shows `[REDACTED:envFile.SMTP_PASSWORD]` in `message` and `data.data`
+
+#### Scenario: Plain envFile setting stays visible
+- **WHEN** the envFile contains `LOG_LEVEL=debug` and output contains `debug`
+- **THEN** `debug` is not masked
+
+#### Scenario: Invalid envFile line is not echoed
+- **WHEN** an envFile line has no `=` (for example a pasted token) and any command loads the file, including `tako config explain --redaction`
+- **THEN** the warning names the line number and file path and does not contain the line's content
+
+#### Scenario: Unreadable envFile in logs
+- **WHEN** `tako logs admin` runs and `.env.production` does not exist on the operator machine
+- **THEN** one `warning` event with `data.reason: "envfile-unreadable"` is emitted and log lines are still streamed
+
+### Requirement: Backup storage credentials are registered for redaction
+Every command that registers registry credentials SHALL also register each selected service's `backup.storage.accessKeyId`, `backup.storage.secretAccessKey` and `backup.storage.sessionToken`, labeled `services.<service>.backup.<field>`.
+
+#### Scenario: Backup secret in a health-failure error
+- **WHEN** `tako rollback` fails a health check and the embedded container log lines contain the value of `backup.storage.secretAccessKey` of service `mongo`
+- **THEN** the error shows `[REDACTED:services.mongo.backup.secretAccessKey]`
+
+### Requirement: config explain reports what will be redacted
+`tako config explain --redaction` SHALL print, for the selected environment:
+- every config value that will be masked, with its label and reason;
+- for every service, each `secrets:` ref, `env` key and `envFile` key marked `masked` or `visible`, with the reason;
+- `secrets:` refs that cannot be resolved locally or by any `secretSources`;
+- the names kept public;
+- the pattern IDs.
+
+It SHALL exit 0 when entries are unresolvable.
+
+#### Scenario: Masked and visible env keys
+- **WHEN** service `site-renderer` has `env: {CMS_RUNTIME_MODE: site, API_TOKEN: abc}` and the user runs `tako config explain --redaction`
+- **THEN** the output lists `env.CMS_RUNTIME_MODE` as `visible` (plain setting) and `env.API_TOKEN` as `masked` (credential-like name)
+- **AND** the output contains neither `site` as a value nor `abc`
+
+#### Scenario: Unresolvable secret
+- **WHEN** service `admin` references secret `LEGACY_KEY` that is in no local secrets file and no `secretSources` apply
+- **THEN** `secrets.LEGACY_KEY` is listed under "Not resolvable" and the command exits 0
+
+#### Scenario: Labels state reported
+- **WHEN** `TAKO_REDACTION_LABELS=off` is set and the user runs `tako config explain --redaction`
+- **THEN** the report states that labels are off
+
+### Requirement: config explain redaction report is offline and value-free
+`tako config explain --redaction` SHALL NOT:
+- print any secret or env value;
+- print `secretSources` locators beyond the source index and provider name;
+- contact servers;
+- invoke secret provider CLIs.
+
+It SHALL remain human-only.
+
+#### Scenario: Sourced secret not resolved
+- **WHEN** service `admin` references secret `SENDGRID_KEY` that is not in `.tako/secrets*` and the environment has `secretSources: [{provider: aws-ssm, path: /prod/}]`
+- **THEN** `secrets.SENDGRID_KEY` is listed as `masked` with origin `secretSources[0] aws-ssm; not resolved here`
+- **AND** `/prod/` does not appear and no provider CLI is executed
+
+#### Scenario: Machine output refused
+- **WHEN** the user runs `tako config explain --redaction --output json`
+- **THEN** the command fails with the existing human-only error
+
+## MODIFIED Requirements
+
+### Requirement: Logs redact every resolved secret value
+Before emitting any `log.line` event, `tako logs` SHALL register for redaction the values of all secrets referenced by every selected service, including named jobs. This SHALL cover:
+- values resolved from `secretSources`;
+- values from local `.tako/secrets*` files;
+- credential-like literal `env` entries;
+- credential-like values from the service's `envFile`/`envFiles`.
+
+#### Scenario: secretSources value is masked in logs
+- **WHEN** service `web` references a secret whose value is resolved from a `secretSources` provider and a container log line contains that value
+- **THEN** the `log.line` event shows the value redacted in both `data.data` and `message`
+
+#### Scenario: Local secrets file value is masked in logs
+- **WHEN** service `web` references a secret stored in `.tako/secrets` and a container log line contains that value
+- **THEN** the value is redacted in human output and in the `log.line` event
+
+#### Scenario: Job secrets are registered
+- **WHEN** the user runs `tako logs nightly` for a job that references a secret and the recorded run output contains the secret value
+- **THEN** the value is redacted
+
+#### Scenario: envFile credential is masked in logs
+- **WHEN** service `web` loads `envFile: .env.production` containing `DB_PASSWORD=s3cr3t-pass` and a container log line contains `s3cr3t-pass`
+- **THEN** the `log.line` event shows `[REDACTED:envFile.DB_PASSWORD]` in both `data.data` and `message`

@@ -107,9 +107,9 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// Load configuration
-	cfg, err := config.LoadConfig(cfgFile)
+	cfg, err := loadCommandConfigOrError(cmd.Context(), cfgFile)
 	if err != nil {
-		return formatConfigLoadError(cfgFile, err)
+		return err
 	}
 	envName := getEnvironmentName(cfg)
 
@@ -181,10 +181,12 @@ func runRollback(cmd *cobra.Command, args []string) error {
 				StartedAt:    time.Now(),
 				Error:        cliEngine().RedactSensitive(errorText(err)),
 			}
+			result.Summary = synthesizedFailureSummary(hookSession, engine.SummaryOperationRollback, cfg.Project.Name, envName, []string{rollbackService}, result.StartedAt, result.Error)
 		}
 		result.Hooks = outcomes
 	}
 	if result != nil {
+		emitOperationSummary(result.Summary, result.Hooks)
 		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
 			err = emitErr
 		}
@@ -244,6 +246,7 @@ func runProjectRollback(cmd *cobra.Command, cfg *config.Config, request engine.R
 	if err != nil {
 		var unavailable *engine.RollbackUnavailableError
 		if errors.As(err, &unavailable) && unavailable.Result != nil {
+			emitOperationSummary(unavailable.Result.Summary, unavailable.Result.Hooks)
 			if emitErr := emitResultDocument(unavailable.Result); emitErr != nil {
 				return emitErr
 			}
@@ -322,10 +325,16 @@ func runProjectRollback(cmd *cobra.Command, cfg *config.Config, request engine.R
 				StartedAt:    time.Now(),
 				Error:        cliEngine().RedactSensitive(errorText(err)),
 			}
+			names := make([]string, 0, len(plan.Services))
+			for _, service := range plan.Services {
+				names = append(names, service.Name)
+			}
+			result.Summary = synthesizedFailureSummary(hookSession, engine.SummaryOperationRollback, cfg.Project.Name, request.Environment, names, result.StartedAt, result.Error)
 		}
 		result.Hooks = outcomes
 	}
 	if result != nil {
+		emitOperationSummary(result.Summary, result.Hooks)
 		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
 			err = emitErr
 		}
@@ -398,6 +407,16 @@ func dashIfEmpty(value string) string {
 		return "-"
 	}
 	return value
+}
+
+// synthesizedFailureSummary is the summary of a result the cmd layer
+// synthesized because the engine returned none: not_attempted rows when the
+// hooks prove nothing was mutated, else failed rows with an unknown state.
+func synthesizedFailureSummary(session *hookSession, operation string, project string, environment string, services []string, startedAt time.Time, errText string) *engine.OperationSummary {
+	if session.mutationReached() {
+		return cliEngine().FailedWithoutResultSummary(operation, project, environment, services, startedAt, errText)
+	}
+	return cliEngine().FailedBeforeMutationSummary(operation, project, environment, services, startedAt, errText)
 }
 
 func errorText(err error) string {

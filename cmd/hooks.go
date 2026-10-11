@@ -13,6 +13,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/hooks"
+	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
 
@@ -143,8 +144,30 @@ func newHookSession(command string, cfg *config.Config, configPath string, skip 
 	if servers, err := cfg.GetEnvironmentServers(envName); err == nil {
 		session.base.Servers = servers
 	}
+	if instance := cfg.PreviewInstance(); instance != nil && instance.Identity == envName {
+		session.base.Preview = &hooks.PreviewContext{Name: instance.Name, Base: instance.Base, ExpiresAt: previewExpiryEstimate(instance.Policy.EffectiveTTL())}
+	}
 	session.registerSecrets(envName)
 	return session, nil
+}
+
+// previewExpiryEstimate is the expiry a successful deploy now would record
+// for ttl, RFC 3339 UTC, or empty for ttl none or an invalid ttl.
+func previewExpiryEstimate(ttl string) string {
+	duration, never, err := config.ParsePreviewTTL(ttl)
+	if err != nil || never {
+		return ""
+	}
+	return time.Now().Add(duration).UTC().Format(time.RFC3339)
+}
+
+// setPreviewExpiry replaces the TAKO_PREVIEW_EXPIRES_AT value of every
+// later hook.
+func (s *hookSession) setPreviewExpiry(expiresAt string) {
+	if s == nil || s.base.Preview == nil {
+		return
+	}
+	s.base.Preview.ExpiresAt = expiresAt
 }
 
 // registerSecrets makes sure hook output and TAKO_ERROR are redacted the
@@ -152,26 +175,26 @@ func newHookSession(command string, cfg *config.Config, configPath string, skip 
 // itself: config secrets plus passEnv values with credential-like names.
 func (s *hookSession) registerSecrets(envName string) {
 	eng := cliEngine()
-	for _, server := range s.cfg.Servers {
-		eng.RegisterSecret(server.Password)
-	}
+	eng.RegisterServerPasswords(s.cfg.Servers)
 	if services, err := s.cfg.GetServices(envName); err == nil {
 		eng.RegisterPublicConfigNames(s.cfg, services)
 		eng.RegisterServiceEnvValues(services)
+		eng.RegisterBackupSecrets(services)
+		for _, failure := range engine.EnvFileUnreadableErrors(eng.RegisterServiceEnvFileValues(services)) {
+			s.emit(events.TypeWarning, events.LevelWarn, eng.RedactSensitive(engine.EnvFileUnreadableWarning(failure)), map[string]any{
+				"environment": envName, "service": failure.Service, "reason": engine.EnvFileUnreadableReason, "stream": "stderr",
+			})
+		}
 	}
 	eng.RegisterRegistrySecrets(s.cfg)
 	eng.RegisterACMEDNSSecrets(s.cfg)
-	if notifications := s.cfg.Notifications; notifications != nil {
-		eng.RegisterSecret(notifications.Slack)
-		eng.RegisterSecret(notifications.Discord)
-		eng.RegisterSecret(notifications.Webhook)
-	}
+	eng.RegisterNotificationSecrets(s.cfg)
 	var passEnv []string
 	if s.cfg.Hooks != nil {
 		passEnv = s.cfg.Hooks.PassEnv
 	}
-	for _, value := range hooks.CredentialValues(hookEnviron(), passEnv, runtime.GOOS) {
-		eng.RegisterSecret(value)
+	for _, credential := range hooks.CredentialEnv(hookEnviron(), passEnv, runtime.GOOS) {
+		eng.RegisterSecretAs(credential.Value, secrets.HookPassEnvLabel(credential.Name))
 	}
 }
 
@@ -191,6 +214,25 @@ func (s *hookSession) hookOutcomes() []engine.HookOutcome {
 		return nil
 	}
 	return append([]engine.HookOutcome(nil), s.outcomes...)
+}
+
+// preHookFailed reports whether the command's pre hook failed, which means
+// the operation stopped before any mutation.
+func (s *hookSession) preHookFailed() bool {
+	return s != nil && s.failedHook != "" && s.failedHook == s.pre
+}
+
+// mutationReached reports whether the operation may have reached its
+// mutation stage: false only when hooks prove it stopped before it (the pre
+// hook failed, or a hook-gated engine never asked to mutate).
+func (s *hookSession) mutationReached() bool {
+	if s.preHookFailed() {
+		return false
+	}
+	if s != nil && !s.inert() && !s.reached {
+		return false
+	}
+	return true
 }
 
 // run executes one hook with the session context merged into ctx values.
@@ -344,6 +386,10 @@ func hookErrorClass(class engine.Class) string {
 
 // mergeHookContext copies the non-empty fields of values into dst.
 func mergeHookContext(dst *hooks.Context, values hooks.Context) {
+	if values.Preview != nil {
+		preview := *values.Preview
+		dst.Preview = &preview
+	}
 	if len(values.Services) > 0 {
 		dst.Services = values.Services
 	}

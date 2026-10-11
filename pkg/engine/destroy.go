@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // KindDestroyResult identifies a serialized destroy result document.
@@ -168,12 +171,12 @@ func (e *Engine) PlanDestroy(ctx context.Context, req DestroyRequest) (*DestroyS
 		return nil, err
 	}
 
-	for _, server := range serversToDestroy {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(serversToDestroy)
 	if services, servicesErr := cfg.GetServices(session.envName); servicesErr == nil {
 		e.RegisterPublicConfigNames(cfg, services)
 		e.RegisterServiceEnvValues(services)
+		e.registerServiceEnvFileValuesOrWarn(services, session.envName, events.PhasePlan)
+		e.RegisterBackupSecrets(services)
 	}
 
 	mode := DestroyModeDecommission
@@ -318,6 +321,9 @@ func (s *DestroySession) Apply(ctx context.Context) (*DestroyResult, error) {
 			destroyErr = &ConnectivityError{Server: serverName, Err: fmt.Errorf("failed to connect to %s: %w", serverName, connectErr)}
 		} else if destroyErr = s.decommissionApp(ctx, client, cfg, envName, s.req.Verbose); destroyErr == nil && s.req.PurgeAll {
 			destroyErr = s.purgeProjectRuntime(ctx, client, cfg, envName, s.req.Verbose)
+		}
+		if destroyErr == nil && connectErr == nil {
+			destroyErr = RemoveMeshPeerSetContext(ctx, client, cfg, serverCfg, envName)
 		}
 		if destroyErr != nil {
 			e.warn(events.PhaseCleanup, fmt.Sprintf("⚠️  Errors removing app runtime on %s: %v\n", serverName, destroyErr))
@@ -470,5 +476,33 @@ func (s *DestroySession) purgeProjectRuntime(ctx context.Context, client any, cf
 
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "  ✓ App-owned leftovers pruned\n")
 
+	return nil
+}
+
+// RemoveMeshPeerSetContext deletes the environment's mesh peer set from a
+// node whose takod keeps one set per (project, environment); the node then
+// re-renders the union of the remaining sets, so other environments sharing
+// the node keep their peers. Enrolled nodes and older agents are skipped:
+// the platform owns enrolled meshes, and an older agent has no sets.
+func RemoveMeshPeerSetContext(ctx context.Context, client any, cfg *config.Config, server config.ServerConfig, envName string) error {
+	if strings.TrimSpace(server.ClusterID) != "" && strings.TrimSpace(server.NodeID) != "" {
+		return nil
+	}
+	socket := TakodSocketFromConfig(cfg)
+	output, err := takodclient.RequestJSONWithContext(ctx, client, socket, "GET", "/v1/status", nil)
+	if err != nil {
+		return fmt.Errorf("read takod capabilities for mesh peer set removal: %w", err)
+	}
+	var status takod.Status
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		return fmt.Errorf("parse takod capabilities for mesh peer set removal: %w", err)
+	}
+	if !statusHasCapability(&status, takod.CapabilityMeshPeerSetsV1) {
+		return nil
+	}
+	endpoint := "/v1/mesh/peer-sets/" + url.PathEscape(cfg.Project.Name) + "/" + url.PathEscape(envName)
+	if _, err := takodclient.RequestJSONWithContext(ctx, client, socket, "DELETE", endpoint, nil); err != nil {
+		return fmt.Errorf("remove mesh peer set: %w", err)
+	}
 	return nil
 }

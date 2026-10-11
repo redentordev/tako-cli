@@ -54,7 +54,9 @@ var domainsHostsCmd = &cobra.Command{
 	Long: `Print host-file entries for services configured with proxy.visibility=internal.
 
 By default, Tako maps each internal host to servers.NODE.privateHost when it
-is configured and falls back to the generated mesh IP for that proxy node.`,
+is configured and otherwise reads the proxy node's recorded mesh address from
+its takod agent. Mesh lookups need SSH access to the proxy nodes and fail when a
+node is unreachable or has not been deployed yet.`,
 	RunE: runDomainsHosts,
 }
 

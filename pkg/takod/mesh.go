@@ -7,6 +7,12 @@ import (
 	"github.com/redentordev/tako-cli/pkg/mesh"
 )
 
+// CapabilityMeshPeerSetsV1 means takod stores one mesh peer set per project
+// and environment and renders its WireGuard interface from their union, so
+// environments and projects sharing a node no longer replace each other's
+// peers.
+const CapabilityMeshPeerSetsV1 = "mesh.peer-sets-v1"
+
 type MeshKeyResponse struct {
 	PublicKey string `json:"publicKey"`
 }

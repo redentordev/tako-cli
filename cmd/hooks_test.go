@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -330,6 +331,21 @@ func TestDeployFailingPreHookAbortsBeforeApply(t *testing.T) {
 	if len(result.Hooks) != 2 || result.Hooks[0].Status != engine.HookFailed || result.Hooks[1].Name != "on-failure" {
 		t.Fatalf("hooks = %+v", result.Hooks)
 	}
+	summary := result.Summary
+	if summary == nil || summary.Outcome != engine.SummaryOutcomeFailed || len(summary.Services) != 2 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	for _, row := range summary.Services {
+		if row.Change != engine.SummaryChangeNotAttempted {
+			t.Fatalf("row = %+v, want not_attempted", row)
+		}
+	}
+	if summary.Undo == nil || summary.Undo.Command != "" || summary.Undo.Unavailable != "nothing was changed" {
+		t.Fatalf("undo = %+v", summary.Undo)
+	}
+	if !slices.Contains(summary.Notes, "pre-deploy hook failed (exit 3)") {
+		t.Fatalf("notes = %v", summary.Notes)
+	}
 	failure := runner.call(t, hooks.OnFailure)
 	for name, want := range map[string]string{"TAKO_HOOK": "on-failure", "TAKO_COMMAND": "deploy", "TAKO_RESULT": "failed", "TAKO_FAILED_HOOK": "pre-deploy", "TAKO_ERROR_CLASS": "failed"} {
 		if failure.env[name] != want {
@@ -357,6 +373,54 @@ func TestDeployFailureRunsOnFailureWithRedactedError(t *testing.T) {
 	}
 	if strings.Join(runner.names(), ",") != "pre-deploy,on-failure" {
 		t.Fatalf("runs = %v", runner.names())
+	}
+}
+
+func TestDeployFailingBeforeMutationWithoutResultIsNotAttempted(t *testing.T) {
+	cases := map[string]struct {
+		err         error
+		wantOutcome string
+		wantChange  string
+		wantUndo    string
+	}{
+		"before first change": {
+			err:         &engine.BeforeMutationError{Err: errors.New("node node-a lacks capability deploy.graceful-stop-v1")},
+			wantOutcome: engine.SummaryOutcomeFailed, wantChange: engine.SummaryChangeNotAttempted, wantUndo: engine.UndoUnavailableNotMutated,
+		},
+		"after first change": {
+			err:         errors.New("reconcile web: connection reset"),
+			wantOutcome: engine.SummaryOutcomePartial, wantChange: engine.SummaryChangeFailed, wantUndo: engine.UndoUnavailableUnknownState,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			setupHookTest(t, allDeployHooks)
+			session := installFakeDeploy(t, false)
+			session.result, session.err = nil, tc.err
+			outputFormatFlag = outputFormatJSON
+
+			var runErr error
+			stdout := captureStdout(t, func() { runErr = runDeploy(&cobra.Command{}, nil) })
+			if runErr == nil || exitCodeForError(runErr) != exitCodeForError(tc.err) {
+				t.Fatalf("err = %v (exit %d), want exit %d", runErr, exitCodeForError(runErr), exitCodeForError(tc.err))
+			}
+			var result engine.DeployResult
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("stdout: %v\n%s", err, stdout)
+			}
+			summary := result.Summary
+			if summary == nil || summary.Outcome != tc.wantOutcome || len(summary.Services) == 0 {
+				t.Fatalf("summary = %+v", summary)
+			}
+			for _, row := range summary.Services {
+				if row.Change != tc.wantChange {
+					t.Fatalf("row = %+v, want change %q", row, tc.wantChange)
+				}
+			}
+			if summary.Undo == nil || summary.Undo.Command != "" || summary.Undo.Unavailable != tc.wantUndo {
+				t.Fatalf("undo = %+v", summary.Undo)
+			}
+		})
 	}
 }
 

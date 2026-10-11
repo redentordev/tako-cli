@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/bcrypt"
@@ -52,7 +53,7 @@ func runProxyHashPassword(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return &engine.InvalidRequestError{Err: err}
 	}
-	cliEngine().RegisterSecret(password)
+	cliEngine().RegisterSecretAs(password, secrets.ProxyPasswordLabel())
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), proxyHashPasswordCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)

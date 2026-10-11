@@ -29,6 +29,10 @@ func WriteMetadata(ctx context.Context, dataDir string, req MetadataRequest) (*M
 	if dataDir == "" {
 		return nil, fmt.Errorf("data directory is required")
 	}
+	// The write and the tag record are serialized with legacy mesh applies,
+	// which key an older CLI's apply by the metadata it wrote.
+	meshPeerSetsMu.Lock()
+	defer meshPeerSetsMu.Unlock()
 	response := &MetadataResponse{}
 	if req.Node != nil {
 		path := filepath.Join(dataDir, "node.json")
@@ -43,6 +47,7 @@ func WriteMetadata(ctx context.Context, dataDir string, req MetadataRequest) (*M
 			return nil, fmt.Errorf("failed to write peer metadata: %w", err)
 		}
 		response.PeersPath = path
+		rememberLegacyMetadataLocked(dataDir, req.Peers)
 	}
 	return response, nil
 }

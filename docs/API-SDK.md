@@ -28,6 +28,22 @@ commands in `cmd/` are thin adapters over this package.
   and `Close()` releases the local lock, remote leases, and SSH
   connections.
 - Simpler mutations are single calls: `Rollback`, `Promote`, `Scale`.
+- `DeployResult`, `RollbackResult`, `PromoteResult` and `ScaleResult` carry
+  `Summary *OperationSummary` (JSON `summary`, additive) whenever a result is
+  returned, including on failure. `OperationSummary` holds the operation,
+  project, `SummaryEnvironment` (`name`, `kind`), `Outcome`
+  (`SummaryOutcome*` constants), deployment/display ID, revision, duration,
+  `[]SummaryService` rows (`Change`, strategy, from/to image and revision,
+  `*SummaryReplicas`, `Health`), `[]SummaryURL`, a `*SummaryUndo` (argv,
+  shell-quoted command, target, or `Unavailable` reason), up to five
+  `SummaryNextStep`s, the error and notes. Free text is already redacted
+  with the engine's redactor. The engine leaves `--config` out of undo and
+  next-step commands; adapters that load a non-default config insert it
+  (the CLI does). `ShellJoin`/`ShellQuote` produce the POSIX quoting used
+  for `command`. `FailedBeforeMutationSummary` and
+  `FailedWithoutResultSummary` build the summary for result documents an
+  adapter synthesizes (for example after a failing pre-hook). See
+  [Operation summary](./MACHINE-INTERFACE.md#operation-summary).
 - Remote command execution is available as `Exec(ctx, ExecRequest)`, the
   engine backing `tako exec`: run a command in a running service container
   or as a one-off container from the service image. Output streams as
@@ -166,10 +182,22 @@ commands in `cmd/` are thin adapters over this package.
   register credential-like service env values (`RegisterServiceEnvValues`)
   and SSH passwords before emitting, and mark names and image references
   public (`RegisterPublicConfigNames`) so they stay readable.
-  `RegisterSecret(value)` adds ad-hoc values, `RegisterPublic(value)` keeps
-  a value readable; `RegisterRegistrySecrets(cfg)`
-  registers every `registries:` password (deploy and run call it before
-  any event is emitted).
+  `RegisterSecretAs(value, label)` adds an ad-hoc value under a source
+  label and masks it as `[REDACTED:<label>]`; build labels with the
+  constructors in `pkg/secrets` (`secrets.SecretLabel("STRIPE_KEY")`,
+  `secrets.EnvLabel(name)`, `secrets.ServerPasswordLabel(server)`, ...),
+  never from a value. `RegisterSecret(value)` still compiles and masks as
+  the bare `[REDACTED]`. `RegisterPublic(value)` keeps a value readable;
+  `RegisterRegistrySecrets(cfg)` registers every `registries:` password
+  (deploy and run call it before any event is emitted), and
+  `RegisterServerPasswords`, `RegisterServiceEnvFileValues`,
+  `RegisterBackupSecrets` and `RegisterNotificationSecrets` cover the other
+  config credentials. At the `pkg/secrets` level, `Redactor.RegisterLabeled`
+  is the labeled form of `Redactor.Register`; when a value is registered
+  under several labels the highest kind wins (`secrets.` first). Set
+  `TAKO_REDACTION_LABELS=off` to render plain `[REDACTED]` markers. See
+  [Redaction Guarantees](MACHINE-INTERFACE.md#redaction-guarantees) for the
+  marker grammar.
 
 #### Config export example
 
@@ -295,6 +323,8 @@ phase, level, service, node, message, data), the `Sink` interface, and
 ready-made sinks (`NopSink`, `BufferSink`, `FanoutSink`, `NDJSONSink`).
 `Stream` stamps sequence/time/schema and applies redaction. Event `message`
 carries the exact human rendering; machine consumers parse `type`/`data`.
+`TypeOperationSummary` (`operation.summary`, phase `PhaseSummary`) is the
+CLI's end-of-operation summary event, emitted just before `result`.
 
 ### `pkg/takoapi`
 

@@ -15,6 +15,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/registryauth"
+	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
 
@@ -81,12 +82,12 @@ func providerRegistryConfig() *config.Config {
 // before runtime setup and before placement intent is persisted.
 func TestRegistryPreflightPrecedesFirstMutation(t *testing.T) {
 	firstMutations := map[string][]string{
-		"deploy.go":           {"AcquireRemoteOperationLeasesContext(ctx, session.sshPool", "preflightAndSetupTakodRuntime(", "PersistTakodDesiredIntentWithPlacementBaseline("},
+		"deploy.go":           {"AcquireRemoteOperationLeasesContext(leaseReasonCtx, session.sshPool", "preflightAndSetupTakodRuntime(", "PersistTakodDesiredIntentWithPlacementBaseline("},
 		"rollback.go":         {"preflightAndSetupTakodRuntime(", "PersistTakodDesiredIntentWithPlacementBaseline("},
 		"rollback_project.go": {"s.deployer.SetupTakodRuntime()", "PersistTakodDesiredIntentWithPlacementBaseline("},
 		"scale.go":            {"preflightAndSetupTakodRuntime(", "PersistTakodDesiredIntentWithPlacementBaseline("},
 		"promote.go":          {"preflightAndSetupTakodRuntime(", "PersistTakodDesiredIntentWithPlacementBaseline("},
-		"run.go":              {"preflightAndSetupTakodRuntime(", "PersistTakodDesiredIntentWithPlacementBaseline("},
+		"run.go":              {"preflightAndVerifyTakodRuntime(", "PersistTakodDesiredIntentWithPlacementBaseline("},
 		"placement_apply.go":  {"deploy.PreflightTakodProxyCapabilities(", "MovePreparedServiceTakod("},
 	}
 	for file, mutations := range firstMutations {
@@ -158,6 +159,9 @@ func TestMintedTokenIsRedactedInEventsAndErrors(t *testing.T) {
 	}
 	if n := cliInvocations(t, logPath); n != 1 {
 		t.Fatalf("aws ran %d time(s), want once for one ECR host", n)
+	}
+	if labels := strings.Join(eng.redactor.Labels(), ","); !strings.Contains(labels, secrets.RegistryTokenLabel(engineTestECRHost)) {
+		t.Fatalf("minted token labels = %s, want %s", labels, secrets.RegistryTokenLabel(engineTestECRHost))
 	}
 
 	dockerOutput := "Error response from daemon: Get https://" + engineTestECRHost + "/v2/: denied: token " + engineFakeToken + " expired"

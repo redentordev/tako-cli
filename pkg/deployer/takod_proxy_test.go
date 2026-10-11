@@ -1023,7 +1023,8 @@ func testProxyDeployer() *Deployer {
 			},
 		},
 	}
-	deploy := &Deployer{config: cfg, environment: "production"}
+	// Both nodes recorded the mesh addresses a deploy applied.
+	deploy := &Deployer{config: cfg, environment: "production", meshStatusReader: recordedMeshStatuses(map[string]string{"node-a": "10.210.0.1/24", "node-b": "10.210.0.2/24"})}
 	deploy.meshPortAllocator = func(_ string, serviceName string, _ string, slot int, _ int) (int, error) {
 		return deploy.meshUpstreamPort(serviceName, slot)
 	}

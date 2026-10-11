@@ -631,7 +631,12 @@ func TestCleanupNetworksDisconnectsSharedProxyBeforeRemovingStageNetwork(t *test
 	exportNetwork := runtimeid.ExportNetworkName("demo", "production", "api")
 	otherStage := runtimeid.NetworkName("demo", "preview")
 	otherProject := runtimeid.NetworkName("other", "production")
-	t.Setenv("TAKO_FAKE_NETWORK_LS_OUTPUT", strings.Join([]string{target, exportNetwork, otherStage, otherProject}, "\n")+"\n")
+	t.Setenv("TAKO_FAKE_NETWORK_LS_OUTPUT", strings.Join([]string{
+		target + "\t<no value>\t<no value>\t<no value>",
+		exportNetwork + "\tdemo\tproduction\tapi",
+		otherStage + "\t<no value>\t<no value>\t<no value>",
+		otherProject + "\t<no value>\t<no value>\t<no value>",
+	}, "\n")+"\n")
 
 	removed, err := cleanupNetworks(context.Background(), "demo", "production")
 	if err != nil {

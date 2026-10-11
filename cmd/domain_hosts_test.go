@@ -1,14 +1,17 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
 func TestCollectInternalHostEntriesPrefersPrivateHostAndFallsBackToMesh(t *testing.T) {
 	cfg := testInternalHostsConfig()
+	stubDomainsHostsStatus(t, map[string]string{"node-b": "10.210.0.2/24"})
 
 	entries, err := collectInternalHostEntries(cfg, "production", cfg.Environments["production"].Services, "", "auto")
 	if err != nil {
@@ -63,5 +66,76 @@ func testInternalHostsConfig() *config.Config {
 				},
 			},
 		},
+	}
+}
+
+// stubDomainsHostsStatus fakes GET /v1/status: servers in recorded report
+// that node.mesh.address; any other server is unreachable.
+func stubDomainsHostsStatus(t *testing.T, recorded map[string]string) *[]string {
+	t.Helper()
+	var reads []string
+	previous := readDomainsHostsNodeStatus
+	readDomainsHostsNodeStatus = func(_ *config.Config, serverName string) (takod.Status, error) {
+		reads = append(reads, serverName)
+		address, ok := recorded[serverName]
+		if !ok {
+			return takod.Status{}, errors.New("dial tcp: connection refused")
+		}
+		status := takod.Status{Runtime: "takod"}
+		if address != "" {
+			status.Node = map[string]any{"mesh": map[string]any{"address": address}}
+		}
+		return status, nil
+	}
+	t.Cleanup(func() { readDomainsHostsNodeStatus = previous })
+	return &reads
+}
+
+// The mesh address comes from the node's record, not from the server's
+// position in the environment: a node recorded at .7 is listed at .7.
+func TestDomainsHostsMeshUsesRecordedAddress(t *testing.T) {
+	cfg := testInternalHostsConfig()
+	reads := stubDomainsHostsStatus(t, map[string]string{"node-a": "10.210.0.7/24", "node-b": "10.210.0.3/24"})
+
+	entries, err := collectInternalHostEntries(cfg, "production", cfg.Environments["production"].Services, "", "mesh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, entry := range entries {
+		got = append(got, entry.Server+"="+entry.Address)
+	}
+	if strings.Join(got, ",") != "node-b=10.210.0.3,node-a=10.210.0.7" {
+		t.Fatalf("entries = %v", got)
+	}
+	if len(*reads) != 2 {
+		t.Fatalf("status reads = %v", *reads)
+	}
+}
+
+func TestDomainsHostsMeshErrorsWhenUnreachableOrUnrecorded(t *testing.T) {
+	cfg := testInternalHostsConfig()
+	stubDomainsHostsStatus(t, map[string]string{"node-a": "10.210.0.1/24"})
+	_, err := collectInternalHostEntries(cfg, "production", cfg.Environments["production"].Services, "", "mesh")
+	if err == nil || !strings.Contains(err.Error(), "could not read the recorded mesh address of server node-b") {
+		t.Fatalf("unreachable err = %v", err)
+	}
+
+	stubDomainsHostsStatus(t, map[string]string{"node-a": "10.210.0.1/24", "node-b": ""})
+	_, err = collectInternalHostEntries(cfg, "production", cfg.Environments["production"].Services, "", "mesh")
+	if err == nil || !strings.Contains(err.Error(), "server node-b has no recorded mesh address") {
+		t.Fatalf("unrecorded err = %v", err)
+	}
+}
+
+// Private and SSH modes never contact nodes.
+func TestDomainsHostsPrivateAndSSHModesSkipStatus(t *testing.T) {
+	cfg := testInternalHostsConfig()
+	reads := stubDomainsHostsStatus(t, nil)
+	if _, err := collectInternalHostEntries(cfg, "production", cfg.Environments["production"].Services, "", "ssh"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*reads) != 0 {
+		t.Fatalf("ssh mode read status from %v", *reads)
 	}
 }
