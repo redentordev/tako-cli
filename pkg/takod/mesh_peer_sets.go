@@ -488,10 +488,71 @@ func DeleteMeshPeerSet(ctx context.Context, dataDir, project, environment string
 	return &MeshPeerSetResponse{Applied: true, Sets: len(sets), Peers: len(union.peers), Status: status}, nil
 }
 
+// Legacy metadata tags. An older CLI sends PUT /v1/metadata and then POST
+// /v1/mesh/apply with the same peer list. Another environment's metadata
+// write can land between the two, so the apply cannot rely on the tags of
+// whatever peers.json holds by then. WriteMetadata remembers the tags of
+// every peers document under meshPeerSetsMu, keyed by the data directory and
+// the peer list, and the apply looks its own peer list up.
+const maxLegacyMetadataTags = 64
+
+var (
+	legacyMetadataTags  = map[string]legacyPeersDocument{}
+	legacyMetadataOrder []string
+)
+
+func legacyPeersFingerprint(dataDir string, peers []mesh.Node) string {
+	entries := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		entries = append(entries, strings.TrimSpace(peer.PublicKey)+"@"+meshIP(peer.Address))
+	}
+	sort.Strings(entries)
+	return dataDir + "\x00" + strings.Join(entries, ",")
+}
+
+// rememberLegacyMetadataLocked records the tags of a peers document written
+// through PUT /v1/metadata. Untagged or unparsable documents are ignored.
+func rememberLegacyMetadataLocked(dataDir string, value any) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	var document legacyPeersDocument
+	if json.Unmarshal(data, &document) != nil || !isSafeProjectName(document.Project) || !isSafeRuntimeName(document.Environment) {
+		return
+	}
+	key := legacyPeersFingerprint(dataDir, document.Peers)
+	document.Peers = nil
+	if _, seen := legacyMetadataTags[key]; !seen {
+		legacyMetadataOrder = append(legacyMetadataOrder, key)
+		if len(legacyMetadataOrder) > maxLegacyMetadataTags {
+			delete(legacyMetadataTags, legacyMetadataOrder[0])
+			legacyMetadataOrder = legacyMetadataOrder[1:]
+		}
+	}
+	legacyMetadataTags[key] = document
+}
+
+// legacyApplyTagsLocked returns the peers document whose tags name the set a
+// legacy mesh apply belongs to: the metadata write with the same peer list,
+// else peers.json when it still lists exactly these peers, else nil (an
+// untagged legacy set).
+func legacyApplyTagsLocked(dataDir string, onDisk *legacyPeersDocument, peers []mesh.Node) *legacyPeersDocument {
+	key := legacyPeersFingerprint(dataDir, peers)
+	if document, ok := legacyMetadataTags[key]; ok {
+		return &document
+	}
+	if onDisk != nil && legacyPeersFingerprint(dataDir, onDisk.Peers) == key {
+		return onDisk
+	}
+	return nil
+}
+
 // reconcileLegacyMeshApply handles POST /v1/mesh/apply from a CLI that
 // predates peer sets on a takod that has them. The request is stored as the
-// set named by the tags of the peers.json the same CLI just wrote through
-// PUT /v1/metadata, and the union is rendered under the usual checks.
+// set named by the tags of the metadata the same CLI wrote with the same
+// peer list through PUT /v1/metadata, and the union is rendered under the
+// usual checks.
 func reconcileLegacyMeshApply(ctx context.Context, dataDir string, request MeshApplyRequest) (*MeshApplyResponse, error) {
 	meshPeerSetsMu.Lock()
 	defer meshPeerSetsMu.Unlock()
@@ -502,17 +563,19 @@ func reconcileLegacyMeshApply(ctx context.Context, dataDir string, request MeshA
 	if err != nil {
 		return nil, err
 	}
-	peers, node := readLegacyMeshDocuments(dataDir)
-	set := legacySetFromDocuments(peers, node)
+	onDisk, node := readLegacyMeshDocuments(dataDir)
+	set := legacySetFromDocuments(legacyApplyTagsLocked(dataDir, onDisk, request.Peers), node)
 	set.Config = request.Config
 	set.Config.Enabled = true
 	set.Node = request.Node
 	set.Peers = request.Peers
-	if set.NetworkCIDR == "" {
-		set.NetworkCIDR = networkFromAddress(request.Node.Address)
+	// node.json may already belong to another environment; the request's
+	// own address carries this set's network and prefix.
+	if network := networkFromAddress(request.Node.Address); network != "" && set.NetworkCIDR == "" {
+		set.NetworkCIDR = network
 	}
-	if set.SubnetBits == 0 {
-		set.SubnetBits = prefixFromAddress(request.Node.Address)
+	if prefix := prefixFromAddress(request.Node.Address); prefix > 0 {
+		set.SubnetBits = prefix
 	}
 	set.UpdatedAt = time.Now().UTC()
 	response, err := storeAndRenderLocked(ctx, dataDir, sets, set, false)

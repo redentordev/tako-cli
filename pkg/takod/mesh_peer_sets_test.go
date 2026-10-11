@@ -316,3 +316,46 @@ func TestUntaggedLegacyPeersBecomeLegacySetUntilNextWrite(t *testing.T) {
 		t.Fatalf("legacy set not dropped: %+v", sets)
 	}
 }
+
+// Review finding 6: an older CLI's metadata write and mesh apply are two
+// requests. When another environment's metadata write lands between them,
+// the apply is still stored as the set of the metadata it wrote itself.
+func TestLegacyMeshApplyKeyedByOwnMetadataDespiteConcurrentWrite(t *testing.T) {
+	recordMeshApplies(t)
+	dataDir := t.TempDir()
+	s, a, b := peerSetNode("s", "10.210.0.2/24"), peerSetNode("a", "10.210.0.1/24"), peerSetNode("b", "10.210.0.3/24")
+	writeMetadata := func(environment string, peers ...mesh.Node) {
+		t.Helper()
+		if _, err := WriteMetadata(context.Background(), dataDir, MetadataRequest{
+			Node:  map[string]any{"project": "app", "environment": environment, "node": "s", "mesh": map[string]any{"address": s.Address, "publicKey": s.PublicKey, "subnetBits": 24}},
+			Peers: map[string]any{"project": "app", "environment": environment, "networkCIDR": "10.210.0.0/16", "interface": "tako", "listenPort": 51820, "peers": peers},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// preview's old CLI writes its metadata, production's lands next, then
+	// preview's mesh apply arrives.
+	writeMetadata("preview", s, a)
+	writeMetadata("production", s, b)
+	if _, err := reconcileLegacyMeshApply(context.Background(), dataDir, MeshApplyRequest{
+		Config: mesh.WireGuardConfig{Enabled: true, Interface: "tako", ListenPort: 51820},
+		Node:   s, Peers: []mesh.Node{s, a},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// production's peers.json is migrated as its set; preview's apply is
+	// stored as preview's set and never replaces production's peers.
+	got := map[string][]string{}
+	for _, set := range meshPeerSetSummaries(dataDir) {
+		var peers []string
+		for _, peer := range set.Peers {
+			peers = append(peers, peer.Name)
+		}
+		sort.Strings(peers)
+		got[set.Project+"/"+set.Environment] = peers
+	}
+	want := map[string][]string{"app/preview": {"a", "s"}, "app/production": {"b", "s"}}
+	if len(got) != len(want) || strings.Join(got["app/preview"], ",") != "a,s" || strings.Join(got["app/production"], ",") != "b,s" {
+		t.Fatalf("stored sets = %v, want %v", got, want)
+	}
+}
