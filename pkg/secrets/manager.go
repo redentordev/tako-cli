@@ -106,9 +106,9 @@ func (m *Manager) loadSecrets() error {
 		m.secrets[key] = value
 	}
 
-	// Register all secret values with the redactor
-	for _, value := range m.secrets {
-		m.redactor.Register(value)
+	// Register all secret values with the redactor, labeled by key.
+	for key, value := range m.secrets {
+		m.redactor.RegisterLabeled(value, SecretLabel(key))
 	}
 
 	return nil
@@ -420,14 +420,14 @@ func (m *Manager) GetRedactor() *Redactor {
 	return m.redactor
 }
 
-// CreateEnvFile creates a Docker env file for a service
-func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	envFile := NewEnvFile()
-
-	serviceEnv := make(map[string]string)
+// LoadServiceEnvFiles reads a service's envFile/envFiles and returns the
+// merged values: envFile wins over envFiles, and later files override earlier
+// ones. CreateEnvFile and redaction registration share it.
+func LoadServiceEnvFiles(service *config.ServiceConfig) (map[string]string, error) {
+	values := make(map[string]string)
+	if service == nil {
+		return values, nil
+	}
 	paths := service.EnvFiles
 	if service.EnvFile != "" {
 		paths = []string{service.EnvFile}
@@ -438,9 +438,25 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 			return nil, fmt.Errorf("failed to load service env file %s: %w", path, err)
 		}
 		for key, value := range loaded {
-			serviceEnv[key] = value
-			envFile.Set(key, value)
+			values[key] = value
 		}
+	}
+	return values, nil
+}
+
+// CreateEnvFile creates a Docker env file for a service
+func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	envFile := NewEnvFile()
+
+	serviceEnv, err := LoadServiceEnvFiles(service)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range serviceEnv {
+		envFile.Set(key, value)
 	}
 
 	// Load .env file from current directory for variable expansion

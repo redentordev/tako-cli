@@ -135,16 +135,32 @@ func BuildEnv(base []string, passEnv []string, ctx Context, goos string) []strin
 // not mask ordinary words in events.
 func CredentialValues(base []string, passEnv []string, goos string) []string {
 	var values []string
+	for _, credential := range CredentialEnv(base, passEnv, goos) {
+		values = append(values, credential.Value)
+	}
+	return values
+}
+
+// Credential is one passEnv variable with a credential-like name.
+type Credential struct {
+	Name  string
+	Value string
+}
+
+// CredentialEnv is CredentialValues with the variable names, in base order,
+// so callers can label each value for redaction.
+func CredentialEnv(base []string, passEnv []string, goos string) []Credential {
+	var credentials []Credential
 	for _, entry := range base {
 		name, value, ok := strings.Cut(entry, "=")
 		if !ok || value == "" || isTakoName(name) {
 			continue
 		}
 		if matchesPassEnv(name, passEnv, goos) && config.IsCredentialEnvName(name) {
-			values = append(values, value)
+			credentials = append(credentials, Credential{Name: name, Value: value})
 		}
 	}
-	return values
+	return credentials
 }
 
 func isTakoName(name string) bool {

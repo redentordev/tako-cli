@@ -13,6 +13,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/hooks"
+	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
 
@@ -152,26 +153,26 @@ func newHookSession(command string, cfg *config.Config, configPath string, skip 
 // itself: config secrets plus passEnv values with credential-like names.
 func (s *hookSession) registerSecrets(envName string) {
 	eng := cliEngine()
-	for _, server := range s.cfg.Servers {
-		eng.RegisterSecret(server.Password)
-	}
+	eng.RegisterServerPasswords(s.cfg.Servers)
 	if services, err := s.cfg.GetServices(envName); err == nil {
 		eng.RegisterPublicConfigNames(s.cfg, services)
 		eng.RegisterServiceEnvValues(services)
+		eng.RegisterBackupSecrets(services)
+		for _, failure := range engine.EnvFileUnreadableErrors(eng.RegisterServiceEnvFileValues(services)) {
+			s.emit(events.TypeWarning, events.LevelWarn, eng.RedactSensitive(engine.EnvFileUnreadableWarning(failure)), map[string]any{
+				"environment": envName, "service": failure.Service, "reason": engine.EnvFileUnreadableReason, "stream": "stderr",
+			})
+		}
 	}
 	eng.RegisterRegistrySecrets(s.cfg)
 	eng.RegisterACMEDNSSecrets(s.cfg)
-	if notifications := s.cfg.Notifications; notifications != nil {
-		eng.RegisterSecret(notifications.Slack)
-		eng.RegisterSecret(notifications.Discord)
-		eng.RegisterSecret(notifications.Webhook)
-	}
+	eng.RegisterNotificationSecrets(s.cfg)
 	var passEnv []string
 	if s.cfg.Hooks != nil {
 		passEnv = s.cfg.Hooks.PassEnv
 	}
-	for _, value := range hooks.CredentialValues(hookEnviron(), passEnv, runtime.GOOS) {
-		eng.RegisterSecret(value)
+	for _, credential := range hooks.CredentialEnv(hookEnviron(), passEnv, runtime.GOOS) {
+		eng.RegisterSecretAs(credential.Value, secrets.HookPassEnvLabel(credential.Name))
 	}
 }
 

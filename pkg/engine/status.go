@@ -112,9 +112,7 @@ func (e *Engine) Status(ctx context.Context, req StatusRequest) (*StatusResult, 
 	}
 
 	cfg := req.Config
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(cfg.Servers)
 
 	envName := req.Environment
 	services, err := cfg.GetServices(envName)

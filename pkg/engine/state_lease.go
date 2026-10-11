@@ -98,9 +98,7 @@ func (e *Engine) StateLease(ctx context.Context, req StateLeaseRequest) (*StateL
 		return nil, invalidRequestf("state lease request requires an environment")
 	}
 	cfg := req.Config
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(cfg.Servers)
 
 	envName := strings.TrimSpace(req.Environment)
 	serverNames, err := ResolveStateLeaseTargetServerNames(cfg, envName, req.Server)
