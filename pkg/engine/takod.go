@@ -10,7 +10,6 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
-	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -73,35 +72,34 @@ func buildStrategyHeaderLine(cfg *config.Config, services map[string]config.Serv
 }
 
 // DeployLeaseTargets includes every schedulable environment worker plus any
-// schedulable builder that an auto/remote build may mutate. Setup remains
-// scoped to environment workers; the builder lease protects the later exact
-// image build/transfer operation.
-func DeployLeaseTargets(cfg *config.Config, environmentServers []string, services map[string]config.ServiceConfig) []string {
+// builder candidate that an auto/remote build may mutate. Builder candidates
+// come from config.EnvironmentBuilderCandidates, the same helper the deployer
+// uses to pick build and image-export sources, so a build can never reach an
+// unleased node. Without enrolled servers the candidates are environment
+// members only.
+func DeployLeaseTargets(cfg *config.Config, environment string, environmentServers []string, services map[string]config.ServiceConfig) []string {
 	seen := make(map[string]struct{}, len(environmentServers))
 	for _, name := range environmentServers {
 		seen[name] = struct{}{}
 	}
 	needsRemoteBuilder := cfg.GetBuildStrategy() != config.BuildStrategyLocal && servicesBuildImages(services)
 	if needsRemoteBuilder {
-		for name, server := range cfg.Servers {
-			if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleBuilder) {
-				seen[name] = struct{}{}
-			}
+		// A resolution error leaves no builder to lease; the deployer reports
+		// the same error before any build runs.
+		builders, _ := config.EnvironmentBuilderCandidates(cfg, environment)
+		for _, name := range builders {
+			seen[name] = struct{}{}
 		}
 	}
-	targets := make([]string, 0, len(seen))
-	for name := range seen {
-		targets = append(targets, name)
-	}
-	sort.Strings(targets)
-	return targets
+	return sortedServerSet(seen)
 }
 
 // DeployMutationTargets returns only nodes the resolved deploy can mutate:
-// assigned workers, edge nodes, a required builder, and the authoritative
-// state/controller node. An unrelated unavailable worker therefore cannot
-// block an otherwise local operation.
-func DeployMutationTargets(cfg *config.Config, services map[string]config.ServiceConfig, assignments map[string][]scheduler.Assignment) []string {
+// assigned workers, the environment's edge nodes, a required builder, and the
+// authoritative state/controller node. An unrelated unavailable worker, or a
+// node of another environment, therefore cannot block an otherwise local
+// operation.
+func DeployMutationTargets(cfg *config.Config, environment string, services map[string]config.ServiceConfig, assignments map[string][]scheduler.Assignment) []string {
 	seen := make(map[string]struct{})
 	for serviceName := range services {
 		for _, assignment := range assignments[serviceName] {
@@ -115,18 +113,39 @@ func DeployMutationTargets(cfg *config.Config, services map[string]config.Servic
 		hasProxy = hasProxy || service.IsProxied()
 	}
 	if hasProxy {
-		for name, server := range cfg.Servers {
-			if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleEdge) {
-				seen[name] = struct{}{}
-			}
+		edges, err := config.EnvironmentEdgeCandidates(cfg, environment)
+		if err != nil {
+			// Proxy targets are always a subset of the environment; fall back
+			// to every schedulable member so an unresolvable placement still
+			// fences every node the proxy reconcile could touch.
+			edges = environmentSchedulableMembers(cfg, environment)
+		}
+		for _, name := range edges {
+			seen[name] = struct{}{}
 		}
 	}
-	for _, name := range DeployLeaseTargets(cfg, nil, services) {
+	for _, name := range DeployLeaseTargets(cfg, environment, nil, services) {
 		seen[name] = struct{}{}
 	}
 	if controller, enrolled, err := controllerAuthorityServer(cfg, nil); err == nil && enrolled {
 		seen[controller] = struct{}{}
 	}
+	return sortedServerSet(seen)
+}
+
+func environmentSchedulableMembers(cfg *config.Config, environment string) []string {
+	servers, err := cfg.GetEnvironmentServers(environment)
+	if err != nil {
+		return nil
+	}
+	members, err := config.ResolveSchedulableEnvironmentTargets(cfg.Servers, servers, environment)
+	if err != nil {
+		return nil
+	}
+	return members
+}
+
+func sortedServerSet(seen map[string]struct{}) []string {
 	targets := make([]string, 0, len(seen))
 	for name := range seen {
 		targets = append(targets, name)
@@ -139,26 +158,77 @@ func DeployMutationTargets(cfg *config.Config, services map[string]config.Servic
 // desired assignments in the fenced observation/cleanup set. This is what
 // lets a full deploy remove the last service from a worker instead of
 // forgetting the worker before its old containers are observed and stopped.
-func AddPriorDesiredMutationTargets(cfg *config.Config, current []string, prior *takodstate.DesiredRevision) []string {
+//
+// A prior owner that environment scoping removed from the loaded config
+// because it references unset variables fails closed with an invalid-request
+// error (exit 2) naming the server and the variables; skipping it would leave
+// its containers both unleased and uncleaned. A prior owner that is absent
+// from servers entirely keeps the historical behavior: it is skipped, and the
+// deploy warns about retired nodes from local state.
+func AddPriorDesiredMutationTargets(cfg *config.Config, environment string, current []string, prior *takodstate.DesiredRevision) ([]string, error) {
 	seen := make(map[string]struct{}, len(current))
 	for _, name := range current {
 		seen[name] = struct{}{}
 	}
 	if prior != nil {
+		scopedOut := cfg.ScopedOutServers()
+		var pruned []string
 		for _, service := range prior.Services {
 			for _, assignment := range service.Assignments {
 				if _, configured := cfg.Servers[assignment.Node]; configured {
 					seen[assignment.Node] = struct{}{}
+				} else if _, wasPruned := scopedOut[assignment.Node]; wasPruned && !containsString(pruned, assignment.Node) {
+					pruned = append(pruned, assignment.Node)
 				}
 			}
 		}
+		if len(pruned) > 0 {
+			sort.Strings(pruned)
+			messages := make([]string, 0, len(pruned))
+			for _, name := range pruned {
+				vars := scopedOut[name]
+				refs := make([]string, 0, len(vars))
+				for _, variable := range vars {
+					refs = append(refs, "${"+variable+"}")
+				}
+				verb := "is"
+				if len(refs) > 1 {
+					verb = "are"
+				}
+				messages = append(messages, fmt.Sprintf("server %s holds prior desired assignments for %s but was not loaded because %s %s unset", name, environment, strings.Join(refs, ", "), verb))
+			}
+			return nil, invalidRequestf("%s; export the variable(s) and retry", strings.Join(messages, "; "))
+		}
 	}
-	result := make([]string, 0, len(seen))
-	for name := range seen {
-		result = append(result, name)
+	return sortedServerSet(seen), nil
+}
+
+// PriorOwnerScopeReasons explains why nodes outside the environment are in a
+// lease set: they still hold prior desired assignments for the environment.
+// The reasons are attached to lease and connectivity errors so an operator
+// can see that the node must be reachable (or cleaned with
+// 'tako remove --server') before the environment can be deployed.
+func PriorOwnerScopeReasons(environment string, environmentServers []string, prior *takodstate.DesiredRevision) map[string]string {
+	if prior == nil {
+		return nil
 	}
-	sort.Strings(result)
-	return result
+	members := make(map[string]struct{}, len(environmentServers))
+	for _, name := range environmentServers {
+		members[name] = struct{}{}
+	}
+	reasons := map[string]string{}
+	for _, service := range prior.Services {
+		for _, assignment := range service.Assignments {
+			if _, member := members[assignment.Node]; member || assignment.Node == "" {
+				continue
+			}
+			reasons[assignment.Node] = fmt.Sprintf("node %s holds prior desired assignments for environment %s", assignment.Node, environment)
+		}
+	}
+	if len(reasons) == 0 {
+		return nil
+	}
+	return reasons
 }
 
 // ShouldReplicateDeploymentHistory preserves legacy mesh replication while

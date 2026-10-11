@@ -717,18 +717,19 @@ func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.Se
 	return err
 }
 
+// remoteBuilderServers returns the build and exact-image source candidates.
+// It shares config.EnvironmentBuilderCandidates with the deploy lease
+// computation, so no build or image export runs on an unleased node: without
+// enrolled servers the candidates are the environment's schedulable members.
 func (d *Deployer) remoteBuilderServers() ([]string, error) {
-	builders := make([]string, 0, len(d.config.Servers))
-	for serverName, server := range d.config.Servers {
-		if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleBuilder) {
-			builders = append(builders, serverName)
-		}
-	}
-	if len(builders) == 0 {
-		return nil, fmt.Errorf("environment %s has no schedulable builder-role nodes for remote image builds", d.environment)
-	}
-	sort.Strings(builders)
-	return builders, nil
+	return config.EnvironmentBuilderCandidates(d.config, d.environment)
+}
+
+// RemoteBuilderCandidates exposes the build and exact-image source candidates
+// so lease conformance tests can prove every node the deployer may build on
+// or export from is leased.
+func (d *Deployer) RemoteBuilderCandidates() ([]string, error) {
+	return d.remoteBuilderServers()
 }
 
 func runTakodBuildStrategy(strategy string, local func() error, preflightRemote func() error, remote func() error) (error, error) {
@@ -936,16 +937,28 @@ func retainedOnEveryPlatform(located []retainedImageSource) bool {
 	return true
 }
 
-func (d *Deployer) locateRetainedImage(imageRef string, requiredServers []string) ([]retainedImageSource, map[string][]string, error) {
+// retainedImageSourceServers lists the nodes an exact-image lookup may
+// inspect and export from: the operation's targets plus builder candidates.
+// Without enrolled servers both are environment members, so a lookup never
+// contacts another environment's node.
+func (d *Deployer) retainedImageSourceServers() ([]string, error) {
 	allServers, err := d.getTakodTargetServers()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// A dedicated builder remains a valid exact-image source even when it is
 	// not a workload placement target for this environment. Export is
 	// read-only; imports remain restricted to required schedulable workers.
 	if builders, builderErr := d.remoteBuilderServers(); builderErr == nil {
 		allServers = mergeTakodImageSourceNames(allServers, builders)
+	}
+	return allServers, nil
+}
+
+func (d *Deployer) locateRetainedImage(imageRef string, requiredServers []string) ([]retainedImageSource, map[string][]string, error) {
+	allServers, err := d.retainedImageSourceServers()
+	if err != nil {
+		return nil, nil, err
 	}
 	allGroups, err := d.groupTakodNodesByPlatform(allServers)
 	if err != nil {

@@ -68,6 +68,9 @@ type Config struct {
 	// deferredVariables lists unset ${VAR} names that were referenced only
 	// by environments or servers removed by LoadConfigForEnvironment.
 	deferredVariables []string
+	// scopedOutServers maps each server removed by LoadConfigForEnvironment
+	// to the sorted unset ${VAR} names it referenced.
+	scopedOutServers map[string][]string
 }
 
 // PlatformContext identifies the enrolled cluster that owns the runtime
@@ -983,6 +986,86 @@ func (c *Config) GetEnvironmentServers(envName string) ([]string, error) {
 	}
 
 	return nil, fmt.Errorf("environment '%s' has no servers configured", envName)
+}
+
+// HasEnrolledServers reports whether any server carries enrolled platform
+// identity (clusterId/nodeId). Enrolled configurations use inventory roles and
+// cluster-wide builder/edge candidates; legacy configurations are scoped to
+// the selected environment.
+func (c *Config) HasEnrolledServers() bool {
+	if c == nil {
+		return false
+	}
+	for _, server := range c.Servers {
+		if server.ClusterID != "" || server.NodeID != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// EnvironmentBuilderCandidates returns the sorted servers that may build or
+// export images for an environment. In a configuration without enrolled
+// servers these are the environment's schedulable members only, so a build
+// or image export never reaches a node owned by another environment. Enrolled
+// configurations keep every schedulable builder-role inventory node.
+func EnvironmentBuilderCandidates(cfg *Config, environment string) ([]string, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("builder candidates require a loaded config")
+	}
+	var candidates []string
+	if cfg.HasEnrolledServers() {
+		for name, server := range cfg.Servers {
+			if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleBuilder) {
+				candidates = append(candidates, name)
+			}
+		}
+	} else {
+		environmentServers, err := cfg.GetEnvironmentServers(environment)
+		if err != nil {
+			return nil, err
+		}
+		members, err := ResolveSchedulableEnvironmentTargets(cfg.Servers, environmentServers, environment)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range members {
+			if cfg.Servers[name].HasPlatformRole(nodeidentity.RoleBuilder) {
+				candidates = append(candidates, name)
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("environment %s has no schedulable builder-role nodes for remote image builds", environment)
+	}
+	sort.Strings(candidates)
+	return candidates, nil
+}
+
+// EnvironmentEdgeCandidates returns the sorted servers that may receive proxy
+// mutations for an environment. Without enrolled servers these are the
+// environment's proxy targets; enrolled configurations keep every schedulable
+// edge-role inventory node.
+func EnvironmentEdgeCandidates(cfg *Config, environment string) ([]string, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("edge candidates require a loaded config")
+	}
+	var candidates []string
+	if cfg.HasEnrolledServers() {
+		for name, server := range cfg.Servers {
+			if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleEdge) {
+				candidates = append(candidates, name)
+			}
+		}
+	} else {
+		proxies, err := cfg.GetEnvironmentProxyServers(environment)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, proxies...)
+	}
+	sort.Strings(candidates)
+	return candidates, nil
 }
 
 // GetEnvironmentProxyServers returns the nodes that should reconcile public

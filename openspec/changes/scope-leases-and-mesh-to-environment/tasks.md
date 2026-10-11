@@ -2,29 +2,29 @@
 
 ## 1. PR1: Lease, builder and image-source scoping (CLI only; fixes #114's error; lands after #120)
 
-- [ ] 1.1 Add a regression test for the #114 config: two environments, one server each, no roles, a proxied service and a `build:` service under the default `auto` strategy. Assert:
+- [x] 1.1 Add a regression test for the #114 config: two environments, one server each, no roles, a proxied service and a `build:` service under the default `auto` strategy. Assert:
   - the preview deploy lease set is `{preview}`;
   - no takod call targets `production`;
   - the deploy succeeds when the `production` dial fails.
 
   Write the test first and confirm it fails on master.
-- [ ] 1.2 Add `config.EnvironmentBuilderCandidates(cfg, env)` (D1). Use it, plus `ResolveEnvironmentProxyTargets` for edges, in `DeployLeaseTargets`/`DeployMutationTargets` (`pkg/engine/takod.go:59-125`) and `placementApplyTargets` (`pkg/engine/placement_apply.go:214-239`). Enrolled configs keep inventory roles. Verify with table tests covering:
+- [x] 1.2 Add `config.EnvironmentBuilderCandidates(cfg, env)` (D1). Use it, plus `ResolveEnvironmentProxyTargets` for edges, in `DeployLeaseTargets`/`DeployMutationTargets` (`pkg/engine/takod.go:59-125`) and `placementApplyTargets` (`pkg/engine/placement_apply.go:214-239`). Enrolled configs keep inventory roles. Verify with table tests covering:
   - non-enrolled, proxied;
   - non-enrolled with a remote build;
   - local build strategy;
   - enrolled (unchanged);
   - placement-apply with a proxied service.
-- [ ] 1.3 Use the same helper in `Deployer.remoteBuilderServers` (`pkg/deployer/takod_deploy.go:720-732`), which also scopes `locateRetainedImage` (`:939-960`). Verify with deployer tests:
+- [x] 1.3 Use the same helper in `Deployer.remoteBuilderServers` (`pkg/deployer/takod_deploy.go:720-732`), which also scopes `locateRetainedImage` (`:939-960`). Verify with deployer tests:
   - a build for `staging` never selects `app-prod` as its source;
   - retained-image lookup contacts no server outside the environment.
-- [ ] 1.4 Expose the servers pruned by environment scoping as `Config.ScopedOutServers()` (#120 code). Make `AddPriorDesiredMutationTargets` fail with exit 2 when a prior owner is scoped out (D3). Verify:
+- [x] 1.4 Expose the servers pruned by environment scoping as `Config.ScopedOutServers()` (#120 code). Make `AddPriorDesiredMutationTargets` fail with exit 2 when a prior owner is scoped out (D3). Verify:
   - with a config test that the pruned names and variables are reported;
   - with an engine test that the deploy fails before any lease, naming the server and the variable;
   - that a prior owner absent from `servers:` still follows today's behavior.
-- [ ] 1.5 Add the in-scope reason to lease and connectivity errors for prior owners outside the environment (D2). Verify with a test on the error text.
-- [ ] 1.6 Add a "mutated implies leased" harness. It records every mutating takod request made through the runtime factory during deploy, run, rollback, project rollback, scale and promote, and asserts that each target node was leased. Verify that it fails if `remoteBuilderServers` is reverted to project-wide.
-- [ ] 1.7 Audit the target lists in `cmd/backup.go`, `cmd/cleanup.go`, `cmd/env.go`, `cmd/maintenance.go`, `cmd/live.go` and `cmd/certs.go` for servers outside the environment, and fix any found. Verify with per-command target-list tests.
-- [ ] 1.8 Docs: add a troubleshooting entry for `failed to acquire remote deploy leases: failed to connect to lease node` to `docs/CONFIGURATION.md`. Update the lease scope in `docs/ORCHESTRATION-MODEL.md`, and remove any "separate config per environment" workaround. Verify with `go test ./...`, including the docs snippet tests.
+- [x] 1.5 Add the in-scope reason to lease and connectivity errors for prior owners outside the environment (D2). Verify with a test on the error text.
+- [x] 1.6 Add a "mutated implies leased" harness. It records every mutating takod request made through the runtime factory during deploy, run, rollback, project rollback, scale and promote, and asserts that each target node was leased. Verify that it fails if `remoteBuilderServers` is reverted to project-wide.
+- [x] 1.7 Audit the target lists in `cmd/backup.go`, `cmd/cleanup.go`, `cmd/env.go`, `cmd/maintenance.go`, `cmd/live.go` and `cmd/certs.go` for servers outside the environment, and fix any found. Verify with per-command target-list tests.
+- [x] 1.8 Docs: add a troubleshooting entry for `failed to acquire remote deploy leases: failed to connect to lease node` to `docs/CONFIGURATION.md`. Update the lease scope in `docs/ORCHESTRATION-MODEL.md`, and remove any "separate config per environment" workaround. Verify with `go test ./...`, including the docs snippet tests.
 
 ## 2. PR2: Stable mesh addresses and environment-wide peer lists (CLI only)
 

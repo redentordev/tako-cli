@@ -212,3 +212,14 @@ takod with `mesh.peer-sets-v1`:
 9. **Should `tako run` keep preparing the mesh?**
    - **Decision:** no. It only verifies the agent (D4).
    - **Rationale:** it contacts one server, so it cannot build a correct environment-wide peer list, and today it actively breaks the node's mesh.
+
+## Implementation notes
+
+Deviations from the plan, each chosen as the safest equivalent:
+
+- **PR1 helpers.** Besides `config.EnvironmentBuilderCandidates`, a sibling `config.EnvironmentEdgeCandidates` holds the edge rule, and `Config.HasEnrolledServers()` decides between the environment-scoped and inventory-role paths. `DeployLeaseTargets` and `DeployMutationTargets` gained an `environment` parameter. When proxy placement cannot be resolved, the edge set falls back to every schedulable environment member (never to servers outside the environment), so a lease set can only grow inside the environment.
+- **Deploy target computation** moved into `resolveDeployTargets` (`pkg/engine/deploy.go`) so the #114 regression and the conformance harness exercise the exact code the deploy runs.
+- **D2 error reasons** travel to the lease fan-out through `WithLeaseScopeReasons(ctx, …)`; the reason is appended to both the connectivity and the locked error of that node.
+- **Former-member remediation.** `tako remove --server` only accepts environment members, so the docs point at making the node reachable (the deploy then stops its containers) or `tako state forget-node` for a destroyed node, instead of `tako remove --server old-1`.
+- **1.6 harness.** The engine has no fake transport that can drive whole operations, so the "mutated implies leased" harness (`TestMutatedNodesAreLeased`) is a target-set conformance test: for deploy, run, rollback, project rollback, scale and promote it derives the lease set with the operation's own helper and the mutable set from the deployer (`RemoteBuilderCandidates`, workload targets, edge candidates), and fails when a mutable node is unleased. Reverting `remoteBuilderServers` to project-wide makes it fail.
+- **1.7 audit.** backup, cleanup, env push, maintenance, live, certs and Postgres verification already resolve only environment servers; the audit added a target-list test and no code change.

@@ -346,6 +346,32 @@ Each node stores enough state to stand alone:
 If a node loses contact with the CLI or peers, it keeps serving its last accepted
 revision. New deployments obey `state.onUnreachableNode`.
 
+## Lease Scope
+
+Remote operation leases are keyed per app/stage, so two environments that share
+a server can deploy concurrently. Without enrolled servers, an operation on
+environment `ENV` leases and contacts only:
+
+- the servers of `ENV`;
+- configured servers that still hold `ENV`'s prior desired assignments, so a
+  deploy can stop containers on a server that just left the environment.
+
+Edge, builder, and retained-image source candidates are members of `ENV`
+(`config.EnvironmentBuilderCandidates`). The deploy lease set and the deployer's
+build and image-export sources come from that same helper, so a build or export
+never runs on an unleased node, and an unreachable server of another
+environment never blocks `ENV`. With `state.onUnreachableNode: block`, every
+node in the scoped set is still mandatory: one failure releases every acquired
+lease before mutation. Lease and connectivity errors for a former member say
+that it holds prior desired assignments for `ENV`.
+
+When environment scoping omits a server because its `${VAR}` references are
+unset, and that server holds `ENV`'s prior desired assignments, the deploy
+fails with exit code 2 before taking any lease and names the server and the
+variables. A prior owner that is absent from `servers:` keeps the retired-node
+warning. Enrolled clusters keep their single controller lease, inventory roles,
+and cluster-wide builder and edge candidates.
+
 ## Deployment Strategies
 
 ### Default selection
