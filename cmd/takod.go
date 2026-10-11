@@ -89,10 +89,14 @@ func runTakod(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	metricsOptions, err := takodMetricsOptions()
+	if err != nil {
+		return err
+	}
 	if verbose {
 		fmt.Printf("takod listening on %s with data dir %s\n", socket, dataDir)
 	}
-	err := takod.NewServerWithOptions(socket, dataDir, Version, takod.ServerOptions{
+	err = takod.NewServerWithOptions(socket, dataDir, Version, takod.ServerOptions{
 		NodeName:                takodNode,
 		IdentityFile:            takodIdentityFile,
 		MembershipFile:          takodMembershipFile,
@@ -103,6 +107,7 @@ func runTakod(cmd *cobra.Command, args []string) error {
 		ReservedMemoryBytes:     takodReservedMemoryBytes,
 		MaximumConcurrentBuilds: takodMaximumConcurrentBuilds,
 		DockerDataRoot:          takodDockerDataRoot,
+		Metrics:                 metricsOptions,
 	}).Run(ctx)
 	if errors.Is(err, context.Canceled) {
 		return nil

@@ -37,7 +37,7 @@ func (s *Server) registeredRoutes() []takodRoute {
 		{"/v1/images/build", s.handleImageBuild}, {"/v1/platform", s.handlePlatform}, {"/v1/platform/inventory", s.handleInventoryAuthority}, {"/v1/platform/allocations/authorize", s.handleAllocationAuthorization}, {"/v1/platform/membership/reconcile", s.handleMembershipReconcile},
 		{"/v1/logs", s.handleLogs}, {"/v1/logs/stream", s.handleLogsStream}, {"/v1/exec", s.handleExec}, {"/v1/jobs", s.handleJobs}, {"/v1/jobs/apply", s.handleJobsApply},
 		{"/v1/jobs/runs", s.handleJobRuns}, {"/v1/jobs/trigger", s.handleJobsTrigger}, {"/v1/stats", s.handleStats},
-		{"/v1/alerts", s.handleAlerts}, {"/v1/metrics", s.handleMetrics}, {"/v1/access-logs", s.handleAccessLogs}, {"/v1/discovery/exports", s.handleDiscoveryExports},
+		{"/v1/alerts", s.handleAlerts}, {"/v1/metrics", s.handleMetrics}, {"/v1/metrics/history", s.handleMetricsHistory}, {"/v1/node/status", s.handleNodeStatus}, {"/v1/access-logs", s.handleAccessLogs}, {"/v1/discovery/exports", s.handleDiscoveryExports},
 	}
 }
 
