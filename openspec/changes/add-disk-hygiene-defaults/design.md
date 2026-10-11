@@ -211,3 +211,25 @@ The reclaim never touches:
 7. **Write `daemon.json` (with `live-restore`) on fresh hosts?** **No.** *Rationale: fresh-host detection is unreliable, and the takod default covers Tako containers.*
 8. **New selector or v0.14.2's?** **v0.14.2's**, extended only with scope records, a grace cut-off and kept reasons. *Rationale: one reviewed rule set; the earlier draft that protected every archived desired revision would never have removed anything.*
 9. **Setup writes the new flags into the unit?** **No.** *Rationale: binary defaults reach upgraded nodes; pinned unit flags would freeze today's defaults.*
+
+## Implementation notes
+
+Where the plan and the code disagreed, the implementation takes the safest equivalent:
+
+- **Alert subjects** are the plain `root`, `docker` and `image-gc` (monitoring D13), with event names `disk_reclaim_insufficient` / `resource_normal` and `image_gc_blocked` / `image_gc_resumed`. Detail keys are `freeBytes`, `softBytes`, `hardBytes` and `unreadableScopes`.
+- **Locks.** Autonomous runs (schedule, pressure, scheduler denial) take the maintenance barrier, check the worker fence and take the mutation lock, in that order, before taking the single run slot. `POST /v1/hygiene/reclaim` takes no extra lock, because the lifecycle gate already holds the mutation lock for it like `/v1/cleanup`. For a request reclaim, an active worker fence skips only the image and container steps. Loop runs skip entirely and journal the skip.
+- **Self-healing converged records** are read from `<dataDir>/heal/<project>/<environment>/services/*.json` when present. A container named there is never removed.
+- **`--hygiene-interval=0`** (or a legacy `--build-cache-prune-interval=0` without `--hygiene-interval`) disables all autonomous runs, including the hourly pressure check and the scheduler-denial signal. The logging guard still refreshes hourly. The reclaim endpoint and scoped cleanup keep working.
+- **Spec arithmetic.** The "Soft pressure" scenario said 14 GiB free is above the 15 GiB hard threshold. It is corrected to 17 GiB, which is between hard (15 GiB) and soft (20 GiB).
+- **507 detection.** The node sends no header hint. The client recognises a body starting with `operation denied` and checks the capability through `GET /v1/status` before reclaiming. A node without the capability gets no reclaim call. Reclaim calls and the status probe never trigger a nested reclaim.
+- **Bytes freed** are measured as the statfs free-space delta, with the removed image sizes as the fallback. A dry-run reclaim reports the image and container selection, but it does not simulate the dangling-image or build-cache prunes.
+- **`CleanupRequest.Trigger`** (`deploy` | `cleanup`) is an additive field that labels journal entries. The CLI sets it only for capable nodes.
+- **`ReconcileServiceRequest.DefaultLogging`** is server-set (`json:"-"`) from the logging guard, never read from the body, and never part of the desired document or `tako.configHash`.
+- **Early stop** applies to every reclaim, including requests: once free space is above soft, the remaining steps are skipped.
+- **CLI.**
+  - Deploy-time cleanup checks the capability only when the deploy has image repositories to clean. It emits one warning per deploy that names every old node.
+  - For `tako cleanup`, the old-node skip is a per-server warning, so the run is `partial` (exit 6, as D3 says). A dry run on an old node is reported as that server's `error`.
+  - `--dry-run` still takes the cleanup leases, so it observes a consistent state.
+  - In doctor, logging turned off with `--default-container-logging=off` is not a warning; only operator-managed daemon logging is. The check also warns on pressure, on no run in 48h, or on disabled autonomous runs.
+  - The rollback hint says the image *may* have been removed by node retention ("keeps 3 per service and environment by default"), because the CLI cannot read a node's `--image-retention`.
+- **Verification limits.** The takod package tests run in CI on Linux. Locally they ran on Windows with a temporary shim for the Unix-only helpers. The manual test-server checks (5.4) were not run in this change and are left to release validation.

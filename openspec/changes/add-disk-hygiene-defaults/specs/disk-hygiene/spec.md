@@ -111,8 +111,8 @@ The existing `--build-cache-prune-interval` and `--build-cache-keep-storage` fla
 takod SHALL check free space on the takod data directory and the Docker data root every hour by default. Below the soft threshold `max(1.5 × minimumFreeDiskBytes, min(10% of the filesystem, 50 GiB))` it SHALL run a soft reclaim; below the hard threshold `1.5 × minimumFreeDiskBytes` it SHALL run a hard reclaim.
 
 #### Scenario: Soft pressure
-- **WHEN** the hourly check finds 14 GiB free with a 10 GiB floor on a 200 GiB disk
-- **THEN** a soft reclaim runs, because 14 GiB is below the 20 GiB soft threshold and above the 15 GiB hard threshold
+- **WHEN** the hourly check finds 17 GiB free with a 10 GiB floor on a 200 GiB disk
+- **THEN** a soft reclaim runs, because 17 GiB is below the 20 GiB soft threshold and above the 15 GiB hard threshold
 
 #### Scenario: Large disk mostly volumes
 - **WHEN** a 2 TiB disk has 60 GiB free with a 10 GiB floor

@@ -379,6 +379,113 @@ releases. Now it produces a deprecation warning and is never used.
 
 ---
 
+## Disk Hygiene
+
+takod agents with the `node.disk-hygiene-v1` capability (`tako upgrade
+servers`) keep their own disk tidy, with no extra setup.
+
+**What runs**
+
+- **Daily maintenance** (`--hygiene-interval`, default 24h; when only the
+  older `--build-cache-prune-interval` is set, that interval is used). It
+  removes old Tako-built images beyond the newest 3 per service and
+  environment (`--image-retention`), then prunes the build cache to
+  `--build-cache-keep-storage`. Unattended runs keep any image younger
+  than 24h.
+- **Hourly pressure check** (`--hygiene-check-interval`, default 1h). It
+  measures free space on the takod data directory (`root`) and the Docker
+  data root (`docker`):
+  - the soft threshold is `max(1.5 × minimum, min(10% of the filesystem, 50 GiB))`;
+  - the hard threshold is `1.5 × --minimum-free-disk-bytes`.
+
+  Below a threshold, a reclaim runs. Below soft, it removes dangling
+  images, build cache over the budget, and old images. Below hard, it also
+  shrinks the build cache to `--build-cache-pressure-keep-storage` (2GB)
+  and removes exited Tako containers. Each step stops once free space is
+  back above the soft threshold. A proactive reclaim that does not recover
+  enough is not repeated at that level for 6 hours.
+- **Reclaim before refusing.** When a node denies a request for low disk
+  (HTTP 507), the CLI asks it to reclaim (`POST /v1/hygiene/reclaim`). The
+  CLI then retries the request once, printing `Disk low on <server>:
+  reclaimed X, retrying…` and emitting a `hygiene.reclaimed` event. A
+  denied scheduler run (backup, job, certificate) also triggers a reclaim.
+
+**What is never touched**
+
+Hygiene never touches:
+
+- volumes, backups or `/opt/<project>` files;
+- running containers or container log files;
+- non-Tako containers and images;
+- images pulled with `image:`.
+
+Old-image removal only applies to the (project, environment) scopes a deploy
+or `tako cleanup` has recorded on the node. It skips a scope whose deploy
+lease is held, or that has a restore-on-failure retention record. It never
+removes an image that a current deployment, another environment or any
+container references. If the deployment state cannot be read, nothing is
+removed in that scope.
+
+Rolling back past the retained images fails at the image preflight, with a
+hint to redeploy that revision or raise `--image-retention`.
+
+**Default log rotation.** New containers of services without a `logging`
+block get `json-file` rotation (`max-size=20m`, `max-file=5`). This applies
+unless the Docker default driver is not `json-file`, or `daemon.json` sets
+`log-driver` or `log-opts` (or is unreadable). See
+[Configuration](CONFIGURATION.md).
+
+**Seeing what it did**
+
+- `tako cleanup --dry-run` shows, per server, which old images would be
+  removed and why the rest are kept (`in use`, `current`,
+  `other environment`, `retention`, `recent`).
+- `tako doctor` adds a "Disk Hygiene" check per server (id
+  `disk-hygiene`). It warns on unrotated logs over 1 GiB, operator-managed
+  logging, unreadable state, no recorded scope, or no run in 48h. It fails
+  when a reclaim could not recover enough space.
+- takod keeps a journal of the last 50 runs in
+  `<data-dir>/hygiene/journal.json`. `GET /v1/hygiene` on the takod socket
+  returns:
+  - the policy and thresholds;
+  - the recorded scopes;
+  - the last runs;
+  - containers that run without log rotation.
+- Alerts use kind `hygiene` (node-wide):
+  - `reclaim_insufficient` (critical, subject `root` or `docker`): a
+    reclaim left free space below the hard threshold. Recovers with
+    `resource_normal` above the soft threshold.
+  - `state_unreadable` (warning, subject `image-gc`): image GC skipped a
+    scope because its state could not be read. Recovers with
+    `image_gc_resumed`.
+
+**Changing the defaults.** `tako setup` writes no hygiene flags, so the
+defaults apply. To override them, add a systemd drop-in that repeats the
+unit's `ExecStart` with your flags:
+
+```bash
+sudo systemctl cat takod            # copy the current ExecStart line
+sudo systemctl edit takod
+```
+
+```ini
+[Service]
+ExecStart=
+ExecStart=<current ExecStart line> --hygiene-interval 12h --image-retention 5 --default-container-logging=off
+```
+
+```bash
+sudo systemctl restart takod
+```
+
+`tako upgrade servers` rewrites `takod.service` but not drop-ins. After an
+upgrade, check that the drop-in's `ExecStart` still matches the new unit.
+`--hygiene-interval=0` disables the autonomous runs. Pressure checks are
+part of those runs, so they stop too. The reclaim endpoint and
+`tako cleanup` keep working.
+
+---
+
 ## Comparison with Other Tools
 
 | Feature | tako metrics | tako stats | tako prometheus |

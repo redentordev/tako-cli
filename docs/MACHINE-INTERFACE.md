@@ -121,6 +121,13 @@ Events follow `pkg/takoapi/events.Event` (apiVersion
   `kind: job`, `persistent`, or `not present at target`) for each service
   it leaves alone. Including a persistent service with
   `--include-persistent` emits a `warning` event.
+- `hygiene.reclaimed` (phase `preflight`) reports a disk reclaim the CLI
+  requested after a node with `node.disk-hygiene-v1` denied a request for
+  low disk (HTTP 507 `operation denied`). `data` carries `server`,
+  `endpoint`, `bytesFreed` and `retrying`. With `retrying: true` the
+  original request is retried exactly once; a second denial returns the
+  original error. With `retrying: false` (a streamed body that cannot be
+  replayed) the command fails with the original error and asks to re-run.
 - Consumers MUST ignore unknown event types, fields, and `data` keys —
   the schema grows additively.
 - `level` is one of `debug`, `info`, `warn`, `error`. Debug events are
@@ -614,8 +621,14 @@ exit 2 and still emit the document). A missing config exits 2. `tako doctor
 --output json` returns a `DoctorResult` with project/environment,
 `skipRemote`, overall `status` (`ok` or `attention`), pass/warn/fail
 counts, and `checks` (`name`, `status` `pass|warn|fail|skip`, `detail`,
-`remediation`); any failed check exits with code 6 and still emits the
-document. `tako drift --output json` (single-shot; `--watch` is rejected in
+`remediation`, and an optional stable `id`); any failed check exits with
+code 6 and still emits the document. The per-server "Disk Hygiene" checks
+carry `id: "disk-hygiene"` (read from takod `GET /v1/hygiene`): `pass` for a
+run in the last 48h and no disk pressure; `warn` for unrotated container
+logs over 1 GiB, a default log rotation skipped by operator policy, a last
+run that skipped images for unreadable state, no recorded scope, pressure,
+no recent run, or a node without `node.disk-hygiene-v1` ("upgrade for disk
+hygiene"); `fail` when a reclaim left a filesystem below its floor. `tako drift --output json` (single-shot; `--watch` is rejected in
 machine modes) returns a `DriftResult` with project/environment, `drifted`,
 per-drift entries (`service`, `type`, `severity`, `expected`, `actual`,
 `details`), `servicesOk`, and timings; detected drift exits with code 6 and
@@ -764,7 +777,15 @@ this contract and is rejected together with the global machine modes.
 `maintenance.disable`, `cleanup`), optional `service`, overall `outcome`
 (`ok`, `partial`, `failed`), and per-server outcomes (`done`, `error`,
 cleanup `warnings`); cleanup errors/warnings exit 6 (previously 0) and
-still emit the document. `tako start`/`tako stop` return the same
+still emit the document. On nodes with `node.disk-hygiene-v1`, each cleanup
+server outcome has an additive `hygiene` object: `removed` (`id`, `refs`,
+`sizeBytes`), `kept` (counts by reason: `in use`, `current`,
+`other environment`, `retention`, `recent`), `bytesFreed`, `dryRun` and
+`failed`. With `tako cleanup --dry-run`, `removed` lists what would be
+removed and nothing changes; a node without the capability reports
+`error` "dry run not supported". Without `--dry-run`, such a node skips
+old-image removal and its outcome carries the warning "old-image removal
+skipped on <server>: node agent needs `tako upgrade servers`". `tako start`/`tako stop` return the same
 `ScaleResult` as `tako scale`. Every `tako backup` action (`list`,
 `create` — single volume or `--all`, `restore`, `delete`, `cleanup`)
 returns a `BackupResult` with the action, volume/backupId when relevant,
