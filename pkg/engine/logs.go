@@ -301,11 +301,8 @@ func (e *Engine) StreamLogs(ctx context.Context, req LogsRequest) (*LogsResult, 
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
 	}
-	for _, service := range services {
-		for _, value := range service.Env {
-			e.RegisterSecret(value)
-		}
-	}
+	e.RegisterPublicConfigNames(cfg, services)
+	e.RegisterServiceEnvValues(services)
 	selectedServices := make(map[string]config.ServiceConfig, len(plan.selected))
 	for _, name := range plan.selected {
 		selectedServices[name] = services[name]

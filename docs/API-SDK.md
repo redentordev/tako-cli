@@ -159,8 +159,11 @@ commands in `cmd/` are thin adapters over this package.
 - Errors are classified for exit-code mapping via `engine.Classify`:
   invalid request, locked/leased, connectivity, cancelled, attention.
 - Every emitted event passes through a secrets redactor; operations
-  register service env values and SSH passwords before emitting.
-  `RegisterSecret(value)` adds ad-hoc values; `RegisterRegistrySecrets(cfg)`
+  register credential-like service env values (`RegisterServiceEnvValues`)
+  and SSH passwords before emitting, and mark names and image references
+  public (`RegisterPublicConfigNames`) so they stay readable.
+  `RegisterSecret(value)` adds ad-hoc values, `RegisterPublic(value)` keeps
+  a value readable; `RegisterRegistrySecrets(cfg)`
   registers every `registries:` password (deploy and run call it before
   any event is emitted).
 

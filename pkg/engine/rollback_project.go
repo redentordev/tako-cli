@@ -289,11 +289,8 @@ func (e *Engine) PlanRollback(ctx context.Context, req RollbackRequest) (_ *Roll
 
 	// Register sensitive values with the redactor before emitting anything
 	// that could contain them.
-	for _, service := range services {
-		for _, value := range service.Env {
-			e.RegisterSecret(value)
-		}
-	}
+	e.RegisterPublicConfigNames(cfg, services)
+	e.RegisterServiceEnvValues(services)
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
 	}
