@@ -2,13 +2,17 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/redentordev/tako-cli/internal/providercli"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/spf13/cobra"
@@ -184,6 +188,26 @@ func TestConfigExplainRedactionPrintsNoValues(t *testing.T) {
 		if field == "site" || field == "debug" || field == "production" && !strings.Contains(got, "environments production") {
 			t.Fatalf("report printed a visible value %q:\n%s", field, got)
 		}
+	}
+}
+
+func TestConfigExplainRedactionListsProviderRegistryWithoutMinting(t *testing.T) {
+	writeJardinRedactionFixture(t)
+	config := strings.Replace(jardinRedactionConfig, "registries:\n", "registries:\n  gcr.io:\n    provider: gcr\n", 1)
+	if err := os.WriteFile("tako.yaml", []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restore := providercli.SetForTesting(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		t.Fatalf("config explain --redaction ran provider CLI %s", name)
+		return nil
+	}, func(name string) (string, error) {
+		t.Fatalf("config explain --redaction looked up provider CLI %s", name)
+		return "", nil
+	})
+	t.Cleanup(restore)
+	got := runRedactionReport(t)
+	if !regexp.MustCompile(`(?m)^  registries\.gcr\.io\.token +registry token \(provider\)$`).MatchString(got) {
+		t.Fatalf("provider registry not reported as masked:\n%s", got)
 	}
 }
 

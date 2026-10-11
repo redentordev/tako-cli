@@ -1741,7 +1741,10 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 		Logging:            copyServiceLogging(service.Logging),
 	}
 	if pullImage {
-		request.RegistryAuths = d.registryAuths()
+		request.RegistryAuths, err = d.registryAuths(d.baseContext(), imageRef)
+		if err != nil {
+			return nil, err
+		}
 	}
 	serviceRevision := takodServiceRevisionID(d.config.Project.Name, d.environment, serviceName, imageRef, *service)
 	serviceStrategy := effectiveDeployStrategy(service)

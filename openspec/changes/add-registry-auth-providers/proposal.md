@@ -63,7 +63,7 @@ One CLI-only PR (design.md "Implementation Order").
 - **Minting:** a new `pkg/registryauth/` package (provider adapters, host parsing, in-memory cache, singleflight).
 - **Deployer:** `pkg/deployer/registry.go:31` `registryAuths()` becomes `registryAuths(ctx, imageRef) ([]takod.RegistryAuth, error)`. An empty `imageRef` means a build, and the host filter and minter apply. Callers: `pkg/deployer/takod_deploy.go:1686`, `pkg/deployer/run.go:136`, `pkg/deployer/deployer.go:611-631` (build preamble).
 - **Engine:**
-  - The minter is created per operation with `Engine.RegisterSecret` (`pkg/engine/engine.go:106`) as its redaction callback.
+  - The minter is created per operation with `Engine.RegisterSecretAs` and the label `registries.<host>.token` as its redaction callback.
   - A preflight mint runs before mutation in deploy, rollback, project rollback, scale, promote, run and placement apply.
 - **takod:** no change. The request shape (`RegistryAuth{Registry, Username, Password}`) is unchanged, so no new capability is needed.
 - **Docs and tests:** see tasks.md.

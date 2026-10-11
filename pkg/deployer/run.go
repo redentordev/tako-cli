@@ -124,6 +124,16 @@ func (d *Deployer) RunDeployStepOnNodes(serviceName string, service *config.Serv
 			return nil, fmt.Errorf("run %s: invalid timeout: %w", serviceName, err)
 		}
 	}
+	// Static credentials ride every run request as before; a provider
+	// credential is minted only for the image's registry, and only when the
+	// node will pull.
+	registryAuths := d.staticRegistryAuths()
+	if pullImage {
+		registryAuths, err = d.registryAuths(d.baseContext(), imageRef)
+		if err != nil {
+			return nil, err
+		}
+	}
 	request := takod.ExecRequest{
 		Project:            d.config.Project.Name,
 		Environment:        d.environment,
@@ -133,7 +143,7 @@ func (d *Deployer) RunDeployStepOnNodes(serviceName string, service *config.Serv
 		Entrypoint:         service.Entrypoint.Arguments(),
 		Image:              imageRef,
 		PullImage:          pullImage,
-		RegistryAuths:      d.registryAuths(),
+		RegistryAuths:      registryAuths,
 		EnvFileContent:     envContent,
 		Network:            runtimeid.NetworkName(d.config.Project.Name, d.environment),
 		Mounts:             mounts,

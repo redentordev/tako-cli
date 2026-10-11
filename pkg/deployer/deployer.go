@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redentordev/tako-cli/internal/state"
@@ -91,6 +92,8 @@ type Deployer struct {
 	runtimeFactoryMu         sync.Mutex
 	assignmentMu             sync.Mutex
 	assignments              map[string][]scheduler.Assignment
+	registryMinter           RegistryMinter
+	ghCLITokenUsed           atomic.Bool
 	presetResolver           trustedProxyPresetResolver
 	presetSnapshots          map[string]proxypresets.Snapshot
 	presetMu                 sync.Mutex
@@ -628,7 +631,12 @@ func (d *Deployer) buildImageWithClient(client any, serviceName string, service 
 
 		endpoint := takodclient.ScopedImageBuildEndpoint(d.config.Project.Name, d.environment, fullImageName, service.Dockerfile)
 		body := io.Reader(archive)
-		auths := d.registryAuths()
+		// A build mints every provider entry: FROM lines can name any
+		// registry, possibly through build arguments.
+		auths, err := d.registryAuths(d.baseContext(), "")
+		if err != nil {
+			return "", err
+		}
 		if len(auths) > 0 || len(service.BuildArgs) > 0 || service.BuildTarget != "" {
 			// Credentials ride the body as a JSON preamble line ahead of
 			// the tar stream — never the URL or argv (ADR 10).

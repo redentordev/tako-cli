@@ -189,13 +189,25 @@ type BackupAlertsConfig struct {
 	MaxAge string `yaml:"maxAge,omitempty" json:"maxAge,omitempty"`
 }
 
-// ProjectConfig defines project metadata
-// RegistryConfig holds credentials for one private image registry.
+// RegistryConfig holds credentials for one private image registry: either a
+// static username/password pair (password must be an ${ENV_VAR} reference)
+// or a provider that mints a short-lived token on the deploying machine.
 type RegistryConfig struct {
-	Username string `yaml:"username,omitempty" json:"username,omitempty"` // Use ${ENV_VAR}
-	Password string `yaml:"password,omitempty" json:"password,omitempty"` // Use ${ENV_VAR}
+	Username string `yaml:"username,omitempty" json:"username,omitempty"` // Use ${ENV_VAR}; with provider only for ghcr
+	Password string `yaml:"password,omitempty" json:"password,omitempty"` // Use ${ENV_VAR}; mutually exclusive with provider
+	// Provider mints the credential with a local CLI: ecr, gcr,
+	// artifact-registry (alias of gcr) or ghcr.
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	// Region overrides the ECR region parsed from the host (ecr only; must
+	// agree with the host).
+	Region string `yaml:"region,omitempty" json:"region,omitempty"`
+	// Profile selects the AWS CLI profile (ecr only).
+	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
+	// Account selects the gcloud account (gcr/artifact-registry only).
+	Account string `yaml:"account,omitempty" json:"account,omitempty"`
 }
 
+// ProjectConfig defines project metadata
 type ProjectConfig struct {
 	Name    string `yaml:"name" json:"name"`
 	Version string `yaml:"version" json:"version"`

@@ -312,6 +312,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	}
 
 	deploy := deployer.NewDeployerWithPool(client, cfg, envName, sshPool, req.Verbose)
+	e.attachRegistryMinter(deploy)
 	priorDesired, priorAssignments, err := LoadPriorPlacementState(client, cfg, envName)
 	if err != nil {
 		return nil, err
@@ -333,6 +334,13 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(mutationServers); err != nil {
+		return nil, err
+	}
+	// The retained-image check runs after runtime setup, so the preflight
+	// assumes the per-kind image source (rebuild or pull); a retained image
+	// later attaches nothing.
+	registryNeeds := deploy.RollbackRegistryAuthNeeds(services[req.Service], &serviceState, deployer.RollbackOptions{})
+	if err := preflightRegistryAuth(ctx, deploy, registryNeeds); err != nil {
 		return nil, err
 	}
 	if err := preflightAndSetupTakodRuntime(deploy, services, map[string]config.ServiceConfig{req.Service: rollbackService}); err != nil {

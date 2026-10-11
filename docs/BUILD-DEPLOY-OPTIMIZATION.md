@@ -75,3 +75,7 @@ app and included first-time create work.
 3. Expose cache policy knobs for remote builder cache and local buildx cache.
 4. Add an optional registry-backed path for GHCR/ECR/private registries when a
    team wants durable image distribution instead of direct SSH transfer.
+   Pull and build authentication against these registries already works
+   without wrapper scripts through `registries.<host>.provider` (minted
+   ECR, Artifact Registry/GCR and GHCR tokens); this item is about pushing
+   and distributing images, which Tako does not do today.

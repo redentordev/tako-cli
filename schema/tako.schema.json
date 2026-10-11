@@ -285,20 +285,46 @@
     },
     "registries": {
       "type": "object",
-      "description": "Private image registry credentials keyed by host (e.g. ghcr.io). Passwords must be ${ENV_VAR} references; credentials are request-scoped and never persisted on nodes.",
+      "description": "Private image registry credentials keyed by host (e.g. ghcr.io). Each entry declares either a static username/password (password must be an ${ENV_VAR} reference) or a provider that mints a short-lived token on the deploying machine. Credentials are request-scoped and never persisted on nodes.",
       "additionalProperties": {
         "type": "object",
         "properties": {
           "username": {
             "type": "string",
-            "description": "Registry username. Use ${ENV_VAR}."
+            "description": "Registry username. Use ${ENV_VAR}. With provider, only valid for ghcr."
           },
           "password": {
             "type": "string",
-            "description": "Registry password or token. Must be an ${ENV_VAR} reference."
+            "description": "Registry password or token. Must be an ${ENV_VAR} reference. Mutually exclusive with provider."
+          },
+          "provider": {
+            "type": "string",
+            "enum": ["ecr", "gcr", "artifact-registry", "ghcr"],
+            "description": "Mint the credential with a local CLI: ecr (aws ecr get-login-password), gcr/artifact-registry (gcloud auth print-access-token), ghcr (GH_TOKEN, GITHUB_TOKEN, then gh auth token). The provider must match the host."
+          },
+          "region": {
+            "type": "string",
+            "description": "ECR only: AWS region. Defaults to the region in the host and must agree with it."
+          },
+          "profile": {
+            "type": "string",
+            "description": "ECR only: AWS CLI profile."
+          },
+          "account": {
+            "type": "string",
+            "description": "gcr/artifact-registry only: gcloud account."
           }
         },
-        "required": ["username", "password"],
+        "oneOf": [
+          {
+            "required": ["username", "password"],
+            "not": { "required": ["provider"] }
+          },
+          {
+            "required": ["provider"],
+            "not": { "required": ["password"] }
+          }
+        ],
         "additionalProperties": false
       }
     },

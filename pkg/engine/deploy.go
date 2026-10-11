@@ -357,6 +357,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 
 	// Create deployer with pool for takod support.
 	deploy := deployer.NewDeployerWithPool(nil, cfg, session.envName, session.sshPool, req.Verbose)
+	e.attachRegistryMinter(deploy)
 	priorDesired, priorAssignments, err := LoadPriorPlacementState(stateRuntime, cfg, session.envName)
 	if err != nil {
 		return nil, err
@@ -403,6 +404,11 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, err
 	}
 	if err := deploy.SetTargetServers(setupTargets); err != nil {
+		return nil, err
+	}
+	// Provider registry credentials are minted before leases, runtime setup
+	// or any other node mutation.
+	if err := preflightRegistryAuth(ctx, deploy, deployRegistryAuthNeeds(deploy, services, allServices, req.Service)); err != nil {
 		return nil, err
 	}
 	leaseReasonCtx := WithLeaseScopeReasons(ctx, PriorOwnerScopeReasons(session.envName, connectivityServerNames, priorDesired))

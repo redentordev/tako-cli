@@ -3,13 +3,12 @@ package secrets
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"sort"
 	"strings"
-	"time"
+
+	"github.com/redentordev/tako-cli/internal/providercli"
 )
 
 const (
@@ -27,7 +26,7 @@ const (
 
 var (
 	providerCommandContext = exec.CommandContext
-	providerCommandTimeout = 2 * time.Minute
+	providerCommandTimeout = providercli.DefaultTimeout
 	providerLookPath       = exec.LookPath
 )
 
@@ -203,7 +202,7 @@ func FetchProviderSecrets(ctx context.Context, provider string, names []string, 
 		return nil, fmt.Errorf("unsupported secrets provider %q (supported: %s)", provider, strings.Join(ProviderNames(), ", "))
 	}
 	if _, err := providerLookPath(adapter.Command); err != nil {
-		return nil, fmt.Errorf("%s provider requires the %q CLI on PATH; install it from %s", adapter.Name, adapter.Command, adapter.Install)
+		return nil, providercli.MissingCLIError(adapter.Name, adapter.Command, adapter.Install)
 	}
 	return adapter.fetch(ctx, names, options)
 }
@@ -332,30 +331,12 @@ func runProviderJSON(ctx context.Context, target any, label string, name string,
 	return nil
 }
 
+// runProviderCommand runs a secrets provider CLI through the shared helper.
+// Secret listings keep the historical behavior of falling back to stdout in
+// errors when stderr is empty.
 func runProviderCommand(ctx context.Context, name string, args ...string) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	commandCtx, cancel := context.WithTimeout(ctx, providerCommandTimeout)
-	defer cancel()
-	cmd := providerCommandContext(commandCtx, name, args...)
-	cmd.Env = os.Environ()
-	output, err := cmd.Output()
-	if commandCtx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("%s command timed out after %s", name, providerCommandTimeout)
-	}
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			message := strings.TrimSpace(string(exitErr.Stderr))
-			if message == "" {
-				message = strings.TrimSpace(string(output))
-			}
-			if message != "" {
-				return "", fmt.Errorf("%s failed: %s", name, message)
-			}
-		}
-		return "", fmt.Errorf("%s failed: %w", name, err)
-	}
-	return string(output), nil
+	return providercli.Run(ctx, providercli.Options{
+		Command: providerCommandContext,
+		Timeout: providerCommandTimeout,
+	}, name, args...)
 }
