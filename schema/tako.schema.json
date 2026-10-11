@@ -485,6 +485,44 @@
               "properties": {
                 "maxAge": { "type": "string", "description": "Alert when the latest successful scheduled backup exceeds this Go duration (1m to 8760h)" }
               }
+            },
+            "services": {
+              "type": "object",
+              "description": "Damping defaults for services with monitoring.enabled, checked by takod (monitoring.health-v1)",
+              "properties": {
+                "alertAfter": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Consecutive failed checks before alerting (default 3)" },
+                "recoverAfter": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Consecutive passed checks before recovery (default 2)" }
+              }
+            },
+            "host": {
+              "type": "object",
+              "description": "Node threshold alerts evaluated by takod; requires a shared notification target",
+              "properties": {
+                "disk": { "type": "integer", "minimum": 0, "maximum": 99, "description": "Filesystem used percent (default 90, 0 disables)" },
+                "inodes": { "type": "integer", "minimum": 0, "maximum": 99, "description": "Inodes used percent (default 90, 0 disables)" },
+                "memory": { "type": "integer", "minimum": 0, "maximum": 99, "description": "Memory used percent (default off)" },
+                "cpu": { "type": "integer", "minimum": 0, "maximum": 99, "description": "CPU percent sustained for cpuFor (default off)" },
+                "cpuFor": { "type": "string", "description": "Go duration the CPU threshold must hold (1m to 24h, default 10m)" },
+                "load": { "type": "number", "minimum": 0, "maximum": 1000, "description": "5-minute load average per core (default off)" },
+                "conditions": { "type": "boolean", "description": "Node-condition alerts (default true)" }
+              }
+            },
+            "containers": {
+              "type": "object",
+              "description": "Container OOM and crash-loop alerts evaluated by takod",
+              "properties": {
+                "oom": { "type": "boolean", "description": "Alert when a container is OOM-killed (default true)" },
+                "crashLoop": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "Restarts within crashLoopWindow that count as a crash loop (default 3, 0 disables)" },
+                "crashLoopWindow": { "type": "string", "description": "Go duration window for crashLoop (1m to 24h, default 10m)" }
+              }
+            },
+            "certificates": {
+              "type": "object",
+              "description": "Certificate expiry alerts for routed domains; requires a shared notification target",
+              "properties": {
+                "warnBefore": { "type": "string", "description": "Warn this long before expiry (Go duration, 1h to 8760h, default 336h)" },
+                "criticalBefore": { "type": "string", "description": "Critical this long before expiry (Go duration, 1h to 8760h, default 72h)" }
+              }
             }
           }
         }
@@ -1440,7 +1478,7 @@
                 },
                 "monitoring": {
                   "type": "object",
-                  "description": "Per-service monitoring used by tako monitor",
+                  "description": "Per-service health checks run by takod (monitoring.health-v1) and by tako monitor --local",
                   "properties": {
                     "enabled": {
                       "type": "boolean",
@@ -1448,11 +1486,27 @@
                     },
                     "interval": {
                       "type": "string",
-                      "description": "Check interval, for example 60s"
+                      "description": "Check interval, 10s to 1h (default 60s)"
+                    },
+                    "timeout": {
+                      "type": "string",
+                      "description": "Check timeout, 1s to 60s and shorter than interval (default 10s)"
+                    },
+                    "alertAfter": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100,
+                      "description": "Consecutive failed checks before alerting; overrides notifications.alerts.services.alertAfter"
+                    },
+                    "recoverAfter": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100,
+                      "description": "Consecutive passed checks before recovery; overrides notifications.alerts.services.recoverAfter"
                     },
                     "webhook": {
                       "type": "string",
-                      "description": "Webhook URL for alerts"
+                      "description": "Extra public HTTPS webhook for this service's alerts only; values that fail alert target validation are ignored with a deprecation warning"
                     },
                     "checkType": {
                       "type": "string",

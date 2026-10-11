@@ -100,6 +100,34 @@ func TestExportAlertMetricsIncludesExternalReachabilityAndNoCredentials(t *testi
 	}
 }
 
+func TestExportMonitorMetricsGolden(t *testing.T) {
+	status := &takod.SourceAlertStatus{
+		Subjects: []takod.SourceSubjectStatus{
+			{Kind: takod.AlertKindService, Subject: "web", State: takod.SubjectStateAlerting, Severity: "critical", LastObservedAt: time.Unix(200, 0)},
+			{Kind: takod.AlertKindHost, Subject: "@root", State: takod.SubjectStateAlerting, Severity: "warning", Reasons: []string{"metrics_stale"}},
+		},
+		PendingDeliveries: 1, ExhaustedDeliveries: 2,
+	}
+	var output bytes.Buffer
+	exportMonitorMetrics(&output, "node-a", "demo", "production", status, false)
+	want := `tako_monitor_subject_active{project="demo",environment="production",node="node-a",kind="service",subject="web",severity="critical"} 1
+tako_monitor_subject_last_observed_timestamp_seconds{project="demo",environment="production",node="node-a",kind="service",subject="web",severity="critical"} 200
+tako_monitor_subject_active{project="demo",environment="production",node="node-a",kind="host",subject="@root",severity="warning"} 1
+tako_monitor_pending_deliveries{project="demo",environment="production",node="node-a"} 1
+tako_monitor_exhausted_deliveries{project="demo",environment="production",node="node-a"} 2
+tako_host_metrics_stale{node="node-a"} 1
+
+`
+	if output.String() != want {
+		t.Fatalf("monitor metrics:\n%s\nwant:\n%s", output.String(), want)
+	}
+	output.Reset()
+	exportMonitorMetrics(&output, "node-a", "demo", "production", status, true)
+	if !strings.HasPrefix(output.String(), "# HELP tako_monitor_subject_active") {
+		t.Fatalf("metadata missing: %s", output.String())
+	}
+}
+
 func TestSchedulerAlertOwnersAllowsFullyCordonedEnvironment(t *testing.T) {
 	servers := map[string]config.ServerConfig{
 		"node-a": {Lifecycle: "cordoned"},

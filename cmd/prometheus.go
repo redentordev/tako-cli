@@ -69,11 +69,15 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 		}
 		exportAlertOwnerPresence(os.Stdout, cfg.Project.Name, envName, len(owners) > 0)
 	}
-	alertMetadata := true
+	alertMetadata, monitorMetadata := true, true
 	for _, result := range collectPrometheusNodes(cfg, envName, servers, factory) {
 		if alertOwners[result.serverName] {
 			exportAlertMetrics(os.Stdout, result.serverName, result.host, cfg.Project.Name, envName, result.alertStatus, result.alertsRead, alertMetadata)
 			alertMetadata = false
+		}
+		if result.alertsRead && result.alertStatus != nil && result.alertStatus.Sources != nil {
+			exportMonitorMetrics(os.Stdout, result.serverName, cfg.Project.Name, envName, result.alertStatus.Sources, monitorMetadata)
+			monitorMetadata = false
 		}
 		if result.err != nil || result.metrics == nil {
 			continue
@@ -338,6 +342,50 @@ func exportAlertMetrics(out io.Writer, serverName, serverHost, project, environm
 			fmt.Fprintf(out, "tako_scheduler_alert_subject_last_success_timestamp_seconds%s %d\n", subjectLabels, subject.LastSuccessAt.Unix())
 		}
 	}
+}
+
+// exportMonitorMetrics exports node-side health monitoring state
+// (monitoring.health-v1). Labels carry only public names and closed
+// vocabulary values; targets and credentials are never exported.
+func exportMonitorMetrics(out io.Writer, node, project, environment string, status *takod.SourceAlertStatus, includeMetadata bool) {
+	if status == nil {
+		return
+	}
+	if includeMetadata {
+		for _, metric := range []struct{ name, help string }{
+			{"tako_monitor_subject_active", "Whether a monitored subject is alerting (1) or not (0)"},
+			{"tako_monitor_subject_last_observed_timestamp_seconds", "Last observation time of a monitored subject"},
+			{"tako_monitor_pending_deliveries", "Pending node-side monitoring alert deliveries"},
+			{"tako_monitor_exhausted_deliveries", "Exhausted node-side monitoring alert deliveries"},
+			{"tako_host_metrics_stale", "Whether the node's host metrics sample is stale"},
+		} {
+			fmt.Fprintf(out, "# HELP %s %s\n# TYPE %s gauge\n", metric.name, metric.help, metric.name)
+		}
+	}
+	quote := strconv.Quote
+	nodeLabels := fmt.Sprintf(`{project=%s,environment=%s,node=%s}`, quote(project), quote(environment), quote(node))
+	stale := 0
+	for _, subject := range status.Subjects {
+		labels := fmt.Sprintf(`{project=%s,environment=%s,node=%s,kind=%s,subject=%s,severity=%s}`, quote(project), quote(environment), quote(node), quote(subject.Kind), quote(subject.Subject), quote(subject.Severity))
+		active := 0
+		if subject.State == takod.SubjectStateAlerting || subject.State == takod.SubjectStateFlapping {
+			active = 1
+		}
+		fmt.Fprintf(out, "tako_monitor_subject_active%s %d\n", labels, active)
+		if !subject.LastObservedAt.IsZero() {
+			fmt.Fprintf(out, "tako_monitor_subject_last_observed_timestamp_seconds%s %d\n", labels, subject.LastObservedAt.Unix())
+		}
+		if subject.Kind == takod.AlertKindHost {
+			for _, reason := range subject.Reasons {
+				if reason == "metrics_stale" {
+					stale = 1
+				}
+			}
+		}
+	}
+	fmt.Fprintf(out, "tako_monitor_pending_deliveries%s %d\n", nodeLabels, status.PendingDeliveries)
+	fmt.Fprintf(out, "tako_monitor_exhausted_deliveries%s %d\n", nodeLabels, status.ExhaustedDeliveries)
+	fmt.Fprintf(out, "tako_host_metrics_stale{node=%s} %d\n\n", quote(node), stale)
 }
 
 func exportContainerMetrics(serverName, serverHost string, stats []takod.ContainerStat) {
