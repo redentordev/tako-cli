@@ -1,15 +1,31 @@
 package secrets
 
 import (
-	"fmt"
+	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 )
+
+// RedactionLabelsEnv is the environment variable that turns marker labels
+// off: `off`, `0`, `false` or `no` (case-insensitive) render every mask as
+// the plain `[REDACTED]`. Masking itself cannot be disabled.
+const RedactionLabelsEnv = "TAKO_REDACTION_LABELS"
+
+// RedactionLabelsEnabled reports whether TAKO_REDACTION_LABELS leaves
+// labels on.
+func RedactionLabelsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(RedactionLabelsEnv))) {
+	case "off", "0", "false", "no":
+		return false
+	}
+	return true
+}
 
 // ShouldRedactEnvValue reports whether a plain service `env:` value should be
 // registered with the redactor. Values under credential-like names always
@@ -21,27 +37,36 @@ import (
 // inside service names like `site-renderer`. Values under `secrets:` and
 // `secretSources` are registered separately and are always redacted.
 func ShouldRedactEnvValue(name, value string) bool {
+	return ClassifyEnvValue(name, value).Masked()
+}
+
+// ClassifyEnvValue returns why a plain `env:` or envFile value is masked or
+// stays visible; see ShouldRedactEnvValue.
+func ClassifyEnvValue(name, value string) RedactionReason {
 	if value == "" {
-		return false
+		return ReasonEmpty
 	}
 	if config.IsCredentialEnvName(name) {
-		return true
+		return ReasonCredentialName
 	}
 	if scheme, rest, ok := strings.Cut(value, "://"); ok && scheme != "" {
 		host, path, _ := strings.Cut(rest, "/")
 		if strings.Contains(host, "@") {
-			return true
+			return ReasonURLWithCredentials
 		}
 		for _, part := range strings.FieldsFunc(path, func(r rune) bool {
 			return r == '/' || r == '?' || r == '&' || r == '=' || r == '#'
 		}) {
 			if looksLikeCredential(part) {
-				return true
+				return ReasonTokenURLPart
 			}
 		}
-		return false
+		return ReasonPlainSetting
 	}
-	return looksLikeCredential(value)
+	if looksLikeCredential(value) {
+		return ReasonTokenShapedValue
+	}
+	return ReasonPlainSetting
 }
 
 func looksLikeCredential(value string) bool {
@@ -62,76 +87,146 @@ func looksLikeCredential(value string) bool {
 	return letters && digits
 }
 
-// Redactor automatically redacts sensitive information from output
-type Redactor struct {
-	mu        sync.RWMutex
-	secrets   map[string]string // original -> redacted
-	public    map[string]struct{}
-	patterns  []*regexp.Regexp
-	minLength int
+// redactPattern is one heuristic secret pattern. group selects the submatch
+// that holds the secret; zero means the whole match. Text before the group
+// (the key of a key/value match) is kept.
+type redactPattern struct {
+	id    string
+	re    *regexp.Regexp
+	group int
 }
 
-// NewRedactor creates a new redactor
+// Pattern IDs rendered as `pattern.<id>`.
+const (
+	PatternAssignment        = "assignment"
+	PatternConnectionString  = "connection-string"
+	PatternStripeKey         = "stripe-key"
+	PatternGitHubToken       = "github-token"
+	PatternNPMToken          = "npm-token"
+	PatternDigitalOceanToken = "digitalocean-token"
+	PatternAWSAccessKey      = "aws-access-key"
+	PatternGoogleAPIKey      = "google-api-key"
+	PatternHex64             = "hex64"
+	PatternJWT               = "jwt"
+	PatternBase64            = "base64"
+	PatternHex               = "hex"
+)
+
+// PatternIDs lists every heuristic pattern ID in match order, deduplicated.
+func PatternIDs() []string {
+	return []string{
+		PatternAssignment,
+		PatternConnectionString,
+		PatternStripeKey,
+		PatternGitHubToken,
+		PatternNPMToken,
+		PatternDigitalOceanToken,
+		PatternAWSAccessKey,
+		PatternGoogleAPIKey,
+		PatternHex64,
+		PatternJWT,
+		PatternBase64,
+		PatternHex,
+	}
+}
+
+// Redactor automatically redacts sensitive information from output.
+//
+// Registered values are replaced by a marker naming their source,
+// `[REDACTED:<label>]`, or `[REDACTED]` when unlabeled or when
+// TAKO_REDACTION_LABELS turns labels off. Redact is deterministic and
+// idempotent: Redact(Redact(x)) == Redact(x).
+type Redactor struct {
+	mu        sync.RWMutex
+	secrets   map[string]string   // value -> rendered label
+	labels    map[string]struct{} // every label registered, for marker protection
+	public    map[string]struct{}
+	patterns  []redactPattern
+	minLength int
+	labelsOn  bool
+
+	// Sorted views of secrets and public values, rebuilt lazily after
+	// registration changes.
+	dirty       bool
+	secretOrder []string
+	publicOrder []string
+}
+
+// NewRedactor creates a new redactor. It reads TAKO_REDACTION_LABELS once.
 func NewRedactor() *Redactor {
 	return &Redactor{
 		secrets:   make(map[string]string),
+		labels:    make(map[string]struct{}),
 		public:    make(map[string]struct{}),
 		patterns:  compilePatterns(),
 		minLength: 4, // Don't redact very short values
+		labelsOn:  RedactionLabelsEnabled(),
 	}
 }
 
 // compilePatterns compiles regex patterns for sensitive data detection
-func compilePatterns() []*regexp.Regexp {
-	patternStrings := []string{
-		// Environment variable assignments
-		`(?i)(password|passwd|pwd|pass)[\s=:]+([^\s]+)`,
-		`(?i)(secret|token|key|apikey|api_key|api-key)[\s=:]+([^\s]+)`,
-		`(?i)(auth|authorization|bearer|credential)[\s=:]+([^\s]+)`,
+func compilePatterns() []redactPattern {
+	specs := []struct {
+		id      string
+		pattern string
+		group   int
+	}{
+		// Environment variable assignments; the key is kept.
+		{PatternAssignment, `(?i)(password|passwd|pwd|pass)[\s=:]+([^\s]+)`, 2},
+		{PatternAssignment, `(?i)(secret|token|key|apikey|api_key|api-key)[\s=:]+([^\s]+)`, 2},
+		{PatternAssignment, `(?i)(auth|authorization|bearer|credential)[\s=:]+([^\s]+)`, 2},
 
-		// Connection strings
-		`(?i)mysql:\/\/[^:]+:([^@]+)@`,
-		`(?i)postgres(ql)?:\/\/[^:]+:([^@]+)@`,
-		`(?i)mongodb(\+srv)?:\/\/[^:]+:([^@]+)@`,
-		`(?i)redis:\/\/[^:]+:([^@]+)@`,
+		// Connection strings; only the password is masked.
+		{PatternConnectionString, `(?i)mysql:\/\/[^:]+:([^@]+)@`, 1},
+		{PatternConnectionString, `(?i)postgres(ql)?:\/\/[^:]+:([^@]+)@`, 2},
+		{PatternConnectionString, `(?i)mongodb(\+srv)?:\/\/[^:]+:([^@]+)@`, 2},
+		{PatternConnectionString, `(?i)redis:\/\/[^:]+:([^@]+)@`, 1},
 
 		// API keys and tokens
-		`sk_live_[A-Za-z0-9]+`,     // Stripe
-		`pk_live_[A-Za-z0-9]+`,     // Stripe publishable
-		`ghp_[A-Za-z0-9]{36}`,      // GitHub personal token
-		`ghs_[A-Za-z0-9]{36}`,      // GitHub server token
-		`github_pat_[A-Za-z0-9_]+`, // GitHub fine-grained PAT
-		`npm_[A-Za-z0-9]{36}`,      // NPM
-		`dop_[A-Za-z0-9]{32}`,      // Digital Ocean
+		{PatternStripeKey, `sk_live_[A-Za-z0-9]+`, 0},
+		{PatternStripeKey, `pk_live_[A-Za-z0-9]+`, 0},
+		{PatternGitHubToken, `ghp_[A-Za-z0-9]{36}`, 0},
+		{PatternGitHubToken, `ghs_[A-Za-z0-9]{36}`, 0},
+		{PatternGitHubToken, `github_pat_[A-Za-z0-9_]+`, 0},
+		{PatternNPMToken, `npm_[A-Za-z0-9]{36}`, 0},
+		{PatternDigitalOceanToken, `dop_[A-Za-z0-9]{32}`, 0},
 
 		// Cloud provider patterns
-		`AKIA[0-9A-Z]{16}`,       // AWS Access Key
-		`AIza[0-9A-Za-z\-_]{35}`, // Google API Key
-		`dop_v1_[a-f0-9]{64}`,    // DigitalOcean personal access token (new format)
-		`[a-f0-9]{64}`,           // Hetzner/Linode tokens (64 char hex)
+		{PatternAWSAccessKey, `AKIA[0-9A-Z]{16}`, 0},
+		{PatternGoogleAPIKey, `AIza[0-9A-Za-z\-_]{35}`, 0},
+		{PatternDigitalOceanToken, `dop_v1_[a-f0-9]{64}`, 0},
+		{PatternHex64, `[a-f0-9]{64}`, 0}, // Hetzner/Linode tokens
 
 		// JWT tokens
-		`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`,
+		{PatternJWT, `eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`, 0},
 
 		// Base64 encoded secrets (40+ characters)
-		`[A-Za-z0-9+/]{40,}={0,2}`,
+		{PatternBase64, `[A-Za-z0-9+/]{40,}={0,2}`, 0},
 
 		// Hex encoded secrets (32+ characters)
-		`[a-f0-9]{32,}`,
+		{PatternHex, `[a-f0-9]{32,}`, 0},
 	}
 
-	patterns := make([]*regexp.Regexp, 0, len(patternStrings))
-	for _, p := range patternStrings {
-		if compiled, err := regexp.Compile(p); err == nil {
-			patterns = append(patterns, compiled)
+	patterns := make([]redactPattern, 0, len(specs))
+	for _, spec := range specs {
+		if compiled, err := regexp.Compile(spec.pattern); err == nil {
+			patterns = append(patterns, redactPattern{id: spec.id, re: compiled, group: spec.group})
 		}
 	}
-
 	return patterns
 }
 
-// Register marks a specific value for redaction
+// Register marks a specific value for redaction without a label; it renders
+// as `[REDACTED]`. Prefer RegisterLabeled.
 func (r *Redactor) Register(value string) {
+	r.RegisterLabeled(value, "")
+}
+
+// RegisterLabeled marks a value for redaction under a source label (see the
+// label constructors in labels.go). When the same value is registered under
+// several labels, the label of the highest-precedence kind wins, ties broken
+// lexicographically, independent of registration order.
+func (r *Redactor) RegisterLabeled(value, label string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -139,31 +234,39 @@ func (r *Redactor) Register(value string) {
 	if len(value) < r.minLength {
 		return
 	}
-
-	// Create a redacted version
-	redacted := r.createRedacted(value)
-	r.secrets[value] = redacted
+	label = SanitizeLabel(label)
+	if label != "" {
+		r.labels[label] = struct{}{}
+	}
+	current, exists := r.secrets[value]
+	if !exists || preferLabel(label, current) {
+		r.secrets[value] = label
+	}
+	r.dirty = true
 }
 
-// createRedacted creates a redacted version of a secret
-func (r *Redactor) createRedacted(value string) string {
-	length := len(value)
-
-	if length <= 4 {
-		return "[REDACTED]"
-	} else if length <= 8 {
-		// Show first char only
-		return fmt.Sprintf("%c***", value[0])
-	} else {
-		// Show first and last 2 chars
-		return fmt.Sprintf("%s***%s", value[:2], value[length-2:])
+// Labels returns every label registered with this redactor, sorted.
+func (r *Redactor) Labels() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	labels := make([]string, 0, len(r.labels))
+	for label := range r.labels {
+		labels = append(labels, label)
 	}
+	sort.Strings(labels)
+	return labels
+}
+
+// LabelsEnabled reports whether markers carry labels.
+func (r *Redactor) LabelsEnabled() bool {
+	return r.labelsOn
 }
 
 // RegisterPublic marks a value that is known not to be secret, such as a
 // project, service or environment name, an image reference, or a git commit.
-// Occurrences of a public value are left intact even when a registered secret
-// is a substring of it or a pattern would otherwise match it.
+// A registered secret that lies entirely inside an occurrence of a longer
+// public value stays readable, and patterns never match a public value. A
+// public value never shields a secret that contains or overlaps it.
 func (r *Redactor) RegisterPublic(value string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -172,74 +275,309 @@ func (r *Redactor) RegisterPublic(value string) {
 		return
 	}
 	r.public[value] = struct{}{}
+	r.dirty = true
 }
 
-// publicPlaceholder marks a protected public value while redaction runs. NUL
-// bytes never occur in registered secrets or pattern matches.
-func publicPlaceholder(index int) string {
-	return fmt.Sprintf("\x00%d\x00", index)
+// marker renders the mask for a label.
+func (r *Redactor) marker(label string) string {
+	if label == "" || !r.labelsOn {
+		return "[REDACTED]"
+	}
+	return "[REDACTED:" + label + "]"
 }
 
-// Redact removes sensitive information from text
-func (r *Redactor) Redact(input string) string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+// markerPattern matches text shaped like a marker; only markers this
+// redactor could have produced are protected (see protectMarkers).
+var markerPattern = regexp.MustCompile(`\[REDACTED(?::([A-Za-z0-9_\-@/:.]{1,96}))?\]`)
 
-	output, protected := r.protectPublic(input)
+// placeholderPattern matches the placeholders used while redaction runs.
+// NUL bytes never occur in registered secrets or pattern matches.
+var placeholderPattern = regexp.MustCompile("\x00([0-9]+)\x00")
 
-	// First, redact registered secret values
-	for secret, redacted := range r.secrets {
-		output = strings.ReplaceAll(output, secret, redacted)
-	}
-
-	// Then apply pattern-based redaction
-	for _, pattern := range r.patterns {
-		output = redactPatternMatches(pattern, output)
-	}
-
-	for index, value := range protected {
-		output = strings.ReplaceAll(output, publicPlaceholder(index), value)
-	}
-	return output
+func placeholder(index int) string {
+	return "\x00" + strconv.Itoa(index) + "\x00"
 }
 
-// protectPublic swaps public values present in input for placeholders,
-// longest first so a longer public value wins over one it contains.
-func (r *Redactor) protectPublic(input string) (string, []string) {
-	if len(r.public) == 0 {
-		return input, nil
+// placeholders holds protected text (markers and public values) swapped out
+// while redaction runs.
+type placeholders struct {
+	values []string
+}
+
+func (p *placeholders) add(value string) string {
+	p.values = append(p.values, value)
+	return placeholder(len(p.values) - 1)
+}
+
+func (p *placeholders) restore(input string) string {
+	if len(p.values) == 0 {
+		return input
 	}
-	var present []string
+	return placeholderPattern.ReplaceAllStringFunc(input, func(match string) string {
+		index, err := strconv.Atoi(match[1 : len(match)-1])
+		if err != nil || index < 0 || index >= len(p.values) {
+			return match
+		}
+		return p.values[index]
+	})
+}
+
+// rebuild refreshes the sorted views. Callers hold the write lock.
+func (r *Redactor) rebuild() {
+	r.secretOrder = r.secretOrder[:0]
+	for value := range r.secrets {
+		r.secretOrder = append(r.secretOrder, value)
+	}
+	sortLongestFirst(r.secretOrder)
+	r.publicOrder = r.publicOrder[:0]
 	for value := range r.public {
 		if _, isSecret := r.secrets[value]; isSecret {
 			continue
 		}
-		if strings.Contains(input, value) {
-			present = append(present, value)
-		}
+		r.publicOrder = append(r.publicOrder, value)
 	}
-	if len(present) == 0 {
-		return input, nil
-	}
-	sort.Slice(present, func(i, j int) bool {
-		if len(present[i]) != len(present[j]) {
-			return len(present[i]) > len(present[j])
+	sortLongestFirst(r.publicOrder)
+	r.dirty = false
+}
+
+func sortLongestFirst(values []string) {
+	sort.Slice(values, func(i, j int) bool {
+		if len(values[i]) != len(values[j]) {
+			return len(values[i]) > len(values[j])
 		}
-		return present[i] < present[j]
+		return values[i] < values[j]
 	})
-	output := input
-	for index, value := range present {
-		output = strings.ReplaceAll(output, value, publicPlaceholder(index))
+}
+
+// Redact removes sensitive information from text.
+//
+// It runs in order:
+//  1. Markers this redactor could have produced are swapped for placeholders.
+//  2. One pass over registered secrets and public values: a secret occurrence
+//     stays readable only inside a longer public occurrence; every other
+//     secret occurrence is masked (longest secret first, overlapping
+//     occurrences merged into one marker); public occurrences that do not
+//     overlap a masked secret are protected.
+//  3. Heuristic patterns run on the result; markers and protected public
+//     values are placeholders and are never matched.
+//  4. Placeholders are restored.
+func (r *Redactor) Redact(input string) string {
+	r.mu.RLock()
+	if r.dirty {
+		r.mu.RUnlock()
+		r.mu.Lock()
+		if r.dirty {
+			r.rebuild()
+		}
+		r.mu.Unlock()
+		r.mu.RLock()
 	}
-	return output, present
+	defer r.mu.RUnlock()
+
+	protected := &placeholders{}
+	output := r.protectMarkers(input, protected)
+	output = r.redactRegistered(output, protected)
+	for _, pattern := range r.patterns {
+		output = r.redactPatternMatches(pattern, output, protected)
+	}
+	return protected.restore(output)
+}
+
+// protectMarkers swaps markers this redactor could have produced for
+// placeholders: the bare `[REDACTED]`, markers with a registered label, and
+// `[REDACTED:pattern.<id>]` for a known pattern ID. Other marker-shaped text
+// is ordinary input, so it can never shield a secret.
+func (r *Redactor) protectMarkers(input string, protected *placeholders) string {
+	if !strings.Contains(input, "[REDACTED") {
+		return input
+	}
+	return markerPattern.ReplaceAllStringFunc(input, func(match string) string {
+		if match == "[REDACTED]" || r.ownsLabel(match[len("[REDACTED:"):len(match)-1]) {
+			return protected.add(match)
+		}
+		return match
+	})
+}
+
+func (r *Redactor) ownsLabel(label string) bool {
+	if _, ok := r.labels[label]; ok {
+		return true
+	}
+	if id, ok := strings.CutPrefix(label, LabelKindPattern+"."); ok {
+		for _, known := range PatternIDs() {
+			if id == known {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type occurrence struct {
+	start, end int
+	priority   int // index in the longest-first order
+	label      string
+}
+
+func findOccurrences(input string, values []string, labels map[string]string) []occurrence {
+	var found []occurrence
+	for priority, value := range values {
+		offset := 0
+		for {
+			index := strings.Index(input[offset:], value)
+			if index < 0 {
+				break
+			}
+			start := offset + index
+			occ := occurrence{start: start, end: start + len(value), priority: priority}
+			if labels != nil {
+				occ.label = labels[value]
+			}
+			found = append(found, occ)
+			offset = start + len(value)
+		}
+	}
+	return found
+}
+
+func overlaps(a, b occurrence) bool {
+	return a.start < b.end && b.start < a.end
+}
+
+// redactRegistered masks registered secrets and protects public values in
+// one deterministic pass (see Redact).
+func (r *Redactor) redactRegistered(input string, protected *placeholders) string {
+	if len(r.secretOrder) == 0 && len(r.publicOrder) == 0 {
+		return input
+	}
+	secretOcc := findOccurrences(input, r.secretOrder, r.secrets)
+	publicOcc := findOccurrences(input, r.publicOrder, nil)
+	if len(secretOcc) == 0 && len(publicOcc) == 0 {
+		return input
+	}
+
+	masked := make([]bool, len(secretOcc))
+	validPublic := make([]bool, len(publicOcc))
+	for i := range validPublic {
+		validPublic[i] = true
+	}
+	for changed := true; changed; {
+		changed = false
+		for i, secret := range secretOcc {
+			if masked[i] {
+				continue
+			}
+			shielded := false
+			for j, public := range publicOcc {
+				if validPublic[j] && public.end-public.start > secret.end-secret.start &&
+					public.start <= secret.start && secret.end <= public.end {
+					shielded = true
+					break
+				}
+			}
+			if !shielded {
+				masked[i] = true
+				changed = true
+			}
+		}
+		for j, public := range publicOcc {
+			if !validPublic[j] {
+				continue
+			}
+			for i, secret := range secretOcc {
+				if masked[i] && overlaps(public, secret) {
+					validPublic[j] = false
+					changed = true
+					break
+				}
+			}
+		}
+	}
+
+	// Merge overlapping masked occurrences; each merged span takes the label
+	// of its highest-priority (longest) secret.
+	var spans []occurrence
+	for i, secret := range secretOcc {
+		if masked[i] {
+			spans = append(spans, secret)
+		}
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start != spans[j].start {
+			return spans[i].start < spans[j].start
+		}
+		return spans[i].priority < spans[j].priority
+	})
+	var merged []occurrence
+	for _, span := range spans {
+		if n := len(merged); n > 0 && span.start < merged[n-1].end {
+			last := &merged[n-1]
+			if span.end > last.end {
+				last.end = span.end
+			}
+			if span.priority < last.priority {
+				last.priority = span.priority
+				last.label = span.label
+			}
+			continue
+		}
+		merged = append(merged, span)
+	}
+
+	// Protect valid public occurrences, longest first, without overlaps.
+	var publics []occurrence
+	for j, public := range publicOcc {
+		if validPublic[j] {
+			publics = append(publics, public)
+		}
+	}
+	sort.SliceStable(publics, func(i, j int) bool { return publics[i].priority < publics[j].priority })
+	var chosen []occurrence
+	for _, public := range publics {
+		free := true
+		for _, other := range chosen {
+			if overlaps(public, other) {
+				free = false
+				break
+			}
+		}
+		if free {
+			chosen = append(chosen, public)
+		}
+	}
+
+	type replacement struct {
+		occurrence
+		text string
+	}
+	replacements := make([]replacement, 0, len(merged)+len(chosen))
+	for _, span := range merged {
+		replacements = append(replacements, replacement{span, r.marker(span.label)})
+	}
+	for _, public := range chosen {
+		replacements = append(replacements, replacement{public, input[public.start:public.end]})
+	}
+	sort.Slice(replacements, func(i, j int) bool { return replacements[i].start < replacements[j].start })
+
+	var b strings.Builder
+	last := 0
+	for _, rep := range replacements {
+		b.WriteString(input[last:rep.start])
+		b.WriteString(protected.add(rep.text))
+		last = rep.end
+	}
+	b.WriteString(input[last:])
+	return b.String()
 }
 
 // redactPatternMatches applies one pattern, leaving hex image tags and
 // digests (`repo:<hex>`, `sha256:<hex>`) alone: those are commit SHAs and
 // content hashes, not credentials. Key/value patterns run first, so a hex
-// secret written as `token: <hex>` is still redacted.
-func redactPatternMatches(pattern *regexp.Regexp, input string) string {
-	matches := pattern.FindAllStringIndex(input, -1)
+// secret written as `token: <hex>` is still redacted. A matched value that is
+// only placeholders (already masked or protected) plus closing punctuation
+// is left as is, which keeps markers intact and redaction idempotent.
+func (r *Redactor) redactPatternMatches(pattern redactPattern, input string, protected *placeholders) string {
+	matches := pattern.re.FindAllStringSubmatchIndex(input, -1)
 	if len(matches) == 0 {
 		return input
 	}
@@ -247,17 +585,33 @@ func redactPatternMatches(pattern *regexp.Regexp, input string) string {
 	last := 0
 	for _, match := range matches {
 		start, end := match[0], match[1]
+		valueStart, valueEnd := start, end
+		if pattern.group > 0 && 2*pattern.group+1 < len(match) && match[2*pattern.group] >= 0 {
+			valueStart, valueEnd = match[2*pattern.group], match[2*pattern.group+1]
+		}
 		b.WriteString(input[last:start])
-		value := input[start:end]
-		if isHexReference(input, start, value) {
-			b.WriteString(value)
+		value := input[valueStart:valueEnd]
+		if isHexReference(input, start, input[start:end]) || onlyPlaceholders(value) {
+			b.WriteString(input[start:end])
 		} else {
-			b.WriteString(redactMatch(value))
+			b.WriteString(input[start:valueStart])
+			b.WriteString(protected.add(r.marker(PatternLabel(pattern.id))))
+			b.WriteString(input[valueEnd:end])
 		}
 		last = end
 	}
 	b.WriteString(input[last:])
 	return b.String()
+}
+
+// onlyPlaceholders reports whether value holds at least one placeholder and
+// nothing else but closing punctuation.
+func onlyPlaceholders(value string) bool {
+	if !strings.Contains(value, "\x00") {
+		return false
+	}
+	rest := placeholderPattern.ReplaceAllString(value, "")
+	return strings.Trim(rest, "\"'`,;.)]}>") == ""
 }
 
 func isHexReference(input string, start int, value string) bool {
@@ -275,16 +629,6 @@ func isLowerHex(value string) bool {
 		}
 	}
 	return value != ""
-}
-
-// redactMatch redacts a regex match
-func redactMatch(match string) string {
-	// Try to preserve the key part of key=value pairs
-	if idx := strings.IndexAny(match, "=: "); idx > 0 {
-		key := match[:idx+1]
-		return key + "[REDACTED]"
-	}
-	return "[REDACTED]"
 }
 
 // RedactMap redacts sensitive values in a map
@@ -330,4 +674,6 @@ func (r *Redactor) Clear() {
 	defer r.mu.Unlock()
 
 	r.secrets = make(map[string]string)
+	r.labels = make(map[string]struct{})
+	r.dirty = true
 }

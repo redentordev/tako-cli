@@ -127,9 +127,9 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	// that could contain them.
 	e.RegisterPublicConfigNames(cfg, services)
 	e.RegisterServiceEnvValues(services)
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.registerServiceEnvFileValuesOrWarn(services, envName, events.PhaseDeploy)
+	e.RegisterBackupSecrets(services)
+	e.RegisterServerPasswords(cfg.Servers)
 	e.RegisterACMEDNSSecrets(cfg)
 	e.registerServiceSecretValuesOrWarn(cfg, envName, services, events.PhaseDeploy)
 

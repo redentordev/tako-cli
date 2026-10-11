@@ -343,9 +343,7 @@ func (e *Engine) resolveJobTargets(ctx context.Context, cfg *config.Config, envN
 	if err != nil {
 		return nil, "", nil, err
 	}
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(cfg.Servers)
 	if services, err := cfg.GetServices(envName); err == nil {
 		_ = e.registerServiceSecretValues(cfg, envName, services)
 	}

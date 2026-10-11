@@ -1717,6 +1717,44 @@ environments:
         envFiles: [.env.base, .env.production]
 ```
 
+Credential-like values loaded from `envFile`/`envFiles` are masked in
+command output by the same rule as inline `env:` values (a credential-like
+name, a URL with credentials or a token-like part, or a long token mixing
+letters and digits) and show as `[REDACTED:envFile.<NAME>]`. Commands that
+only read logs or state (`logs`, `rollback`, `promote`, `scale`, `remove`,
+`destroy`) warn once when an envFile cannot be read on the operator machine,
+because its values will not be masked.
+
+Every mask names its source: `[REDACTED:secrets.STRIPE_KEY]`,
+`[REDACTED:env.DATABASE_URL]`, `[REDACTED:servers.app.password]`, or
+`[REDACTED:pattern.jwt]` for a heuristic match. Set
+`TAKO_REDACTION_LABELS=off` to print plain `[REDACTED]` markers instead. To
+see, before deploying, what Tako will mask and why, run:
+
+```bash
+tako config explain --redaction -e production
+```
+
+```text
+Redaction: production (config tako.yaml)
+Labels: on (TAKO_REDACTION_LABELS)
+
+Masked
+  servers.app.password                   ssh password
+  services.mongo.backup.secretAccessKey  backup storage credential
+
+Services
+  admin:
+    masked   secrets.STRIPE_KEY      secrets list (from .tako/secrets.production)
+    masked   envFile.SMTP_PASSWORD   credential-like name (.env.production)
+    visible  env.CMS_RUNTIME_MODE    plain setting
+```
+
+The report never prints a value, never contacts servers and never runs
+secret provider CLIs; keys that would come from `secretSources` are listed
+as `from secretSources[i] <provider>; not resolved here`, and `secrets:`
+references that nothing can resolve are listed under "Not resolvable".
+
 Container runtime controls map directly to Docker run options and work for
 long-running services and scheduled jobs:
 

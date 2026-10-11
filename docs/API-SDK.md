@@ -162,10 +162,22 @@ commands in `cmd/` are thin adapters over this package.
   register credential-like service env values (`RegisterServiceEnvValues`)
   and SSH passwords before emitting, and mark names and image references
   public (`RegisterPublicConfigNames`) so they stay readable.
-  `RegisterSecret(value)` adds ad-hoc values, `RegisterPublic(value)` keeps
-  a value readable; `RegisterRegistrySecrets(cfg)`
-  registers every `registries:` password (deploy and run call it before
-  any event is emitted).
+  `RegisterSecretAs(value, label)` adds an ad-hoc value under a source
+  label and masks it as `[REDACTED:<label>]`; build labels with the
+  constructors in `pkg/secrets` (`secrets.SecretLabel("STRIPE_KEY")`,
+  `secrets.EnvLabel(name)`, `secrets.ServerPasswordLabel(server)`, ...),
+  never from a value. `RegisterSecret(value)` still compiles and masks as
+  the bare `[REDACTED]`. `RegisterPublic(value)` keeps a value readable;
+  `RegisterRegistrySecrets(cfg)` registers every `registries:` password
+  (deploy and run call it before any event is emitted), and
+  `RegisterServerPasswords`, `RegisterServiceEnvFileValues`,
+  `RegisterBackupSecrets` and `RegisterNotificationSecrets` cover the other
+  config credentials. At the `pkg/secrets` level, `Redactor.RegisterLabeled`
+  is the labeled form of `Redactor.Register`; when a value is registered
+  under several labels the highest kind wins (`secrets.` first). Set
+  `TAKO_REDACTION_LABELS=off` to render plain `[REDACTED]` markers. See
+  [Redaction Guarantees](MACHINE-INTERFACE.md#redaction-guarantees) for the
+  marker grammar.
 
 #### Config export example
 

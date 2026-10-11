@@ -1,23 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Redaction markers name their source
-Every mask produced by the engine redactor SHALL be rendered as `[REDACTED:<label>]`, where `<label>` matches `[A-Za-z0-9_\-@/:.]{1,96}` and is a config-path-like name of the value's origin. A label SHALL begin with one of these kinds:
-- `secrets.`
-- `env.`
-- `envFile.`
-- `servers.`
-- `registries.`
-- `environments.`
-- `services.`
-- `notifications.`
-- `hooks.`
-- `run.`
-- `export.`
-- `certs.`
-- `proxy.`
-- `pattern.`
-
-For key/value pattern matches the key SHALL be kept, followed by the marker.
+Every mask produced by the engine redactor SHALL be rendered as `[REDACTED:<label>]`, where `<label>` matches `[A-Za-z0-9_\-@/:.]{1,96}` and is a config-path-like name of the value's origin. A label SHALL begin with a kind: `secrets.`, `env.`, `envFile.`, `servers.`, `registries.`, `environments.`, `services.`, `builds.`, `notifications.`, `hooks.`, `run.`, `export.`, `certs.`, `proxy.` or `pattern.`. Key/value pattern matches SHALL keep the key.
 
 #### Scenario: Aliased secret is labeled by its secret key
 - **WHEN** service `web` declares `secrets: ["API_KEY:STRIPE_KEY"]` and a container log line contains the value of `STRIPE_KEY`
@@ -109,7 +93,7 @@ Every command that registers inline service `env:` values SHALL also register th
 - **THEN** one `warning` event with `data.reason: "envfile-unreadable"` is emitted and log lines are still streamed
 
 ### Requirement: Backup storage credentials are registered for redaction
-Every command that registers registry credentials SHALL also register each selected service's `backup.storage.accessKeyId` and `backup.storage.secretAccessKey`, labeled `services.<service>.backup.<field>`.
+Every command that registers registry credentials SHALL also register each selected service's `backup.storage.accessKeyId`, `backup.storage.secretAccessKey` and `backup.storage.sessionToken`, labeled `services.<service>.backup.<field>`.
 
 #### Scenario: Backup secret in a health-failure error
 - **WHEN** `tako rollback` fails a health check and the embedded container log lines contain the value of `backup.storage.secretAccessKey` of service `mongo`

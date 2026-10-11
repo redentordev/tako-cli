@@ -778,10 +778,25 @@ See [Rollback](#rollback).
   16+ character token mixing letters and digits. Plain settings such as
   `NODE_ENV: production` are not masked; put sensitive values under
   `secrets:` or a credential-like name.
+- Credential-like values from a service's `envFile`/`envFiles` are
+  registered by the same rule as inline `env:` values, labeled
+  `envFile.<NAME>`. `deploy` and `exec` ignore an unreadable envFile here
+  (building the container env file fails on it). `logs`, `rollback`,
+  `promote`, `scale`, `remove`, `destroy` and hooks emit one `warning`
+  event per service with `data.reason: "envfile-unreadable"` (and
+  `data.service`) stating that the file's values will not be redacted, and
+  continue.
+- Service backup storage credentials (`backup.storage.accessKeyId`,
+  `secretAccessKey`, `sessionToken`) are registered wherever registry
+  credentials are, and by `logs`, `rollback`, `promote`, `scale`, `remove`,
+  `destroy` and hooks.
 - Project, environment, server and service names, service image
   references, and hex image tags or digests (`repo:<commit-sha>`,
   `@sha256:<digest>`) stay readable even when a registered secret is a
-  substring of them.
+  substring of them. A registered secret stays visible only when it lies
+  entirely inside a longer public value; a public name inside or
+  overlapping a secret (a project name used as a token prefix) never
+  shields it.
 - Secret values referenced by a service's `secrets:` list are registered
   too, whether they come from `.tako/secrets*` files or from
   `secretSources` providers, and including aliased references
@@ -807,6 +822,65 @@ See [Rollback](#rollback).
   values, volume driver options and labels, proxy basic-auth verifiers, and
   custom response-header values. Warnings identify every value that must be
   restored before deploying the export.
+
+### Redaction markers
+
+Every mask in event `message` and `data` strings, result documents and
+human output is a marker that names the source of the hidden value:
+
+```
+marker  = "[REDACTED" [ ":" label ] "]"
+label   = segment *( "." segment )        ; 1..96 bytes
+segment = 1*( ALPHA / DIGIT / "_" / "-" / "@" / "/" / ":" )
+```
+
+Detect masks with the regular expression `\[REDACTED(:[^\]]*)?\]`. A
+registered value is always replaced in full; no characters of it, and
+not its length, are revealed (the earlier `ab***yz` partial reveal is
+gone). Key/value pattern matches keep the key:
+`password=[REDACTED:pattern.assignment]`.
+
+Labels are config-path-like and start with a fixed kind:
+
+| Label | Source |
+|---|---|
+| `secrets.<KEY>` | a `secrets:` reference (local `.tako/secrets*` or `secretSources`); an aliased `API_KEY:STRIPE_KEY` reports `secrets.STRIPE_KEY` |
+| `env.<NAME>` | a credential-like inline `env:` value |
+| `envFile.<NAME>` | a credential-like `envFile`/`envFiles` value |
+| `servers.<server>.password` | an SSH password |
+| `registries.<host>.password` | a registry password |
+| `environments.<env>.proxy.acme.<NAME>` | an ACME DNS provider credential |
+| `services.<service>.backup.<field>` | a backup storage credential |
+| `builds.<build>.args.<ARG>` | a shared build arg value (deploy) |
+| `notifications.slack\|discord\|webhook` | a notification URL |
+| `hooks.passEnv.<NAME>` | a credential-like hook `passEnv` variable |
+| `run.env.<NAME>` | a `tako run` env value |
+| `export.password`, `certs.privateKey`, `proxy.password` | command inputs |
+| `pattern.<id>` | a heuristic match: `assignment`, `connection-string`, `stripe-key`, `github-token`, `npm-token`, `digitalocean-token`, `aws-access-key`, `google-api-key`, `hex64`, `jwt`, `base64`, `hex` |
+
+When one value is registered under several labels, the label is chosen by
+kind precedence (`secrets.`, `envFile.`, `env.`, `registries.`,
+`servers.`, `environments.`, `services.`, `builds.`, `notifications.`,
+`hooks.`, `run.`, `export.`, `certs.`, `proxy.`), then lexicographically, so the
+output does not depend on registration order. Labels are built only from
+names in the committed config and fixed vocabulary; they never contain a
+value, part of one, or a `secretSources` locator (path, names, vault,
+project, profile or map source name).
+
+Label kinds are stable. New kinds and pattern IDs may be added; consumers
+should match the marker regex rather than an exact label list.
+
+Redaction is deterministic (longest registered value first) and
+idempotent: redacting already-redacted text with the same redactor leaves
+markers intact. Only markers the redactor could have produced (the bare
+`[REDACTED]`, registered labels and known `pattern.<id>` labels) are
+protected; other marker-shaped text is redacted like any other text.
+
+Set `TAKO_REDACTION_LABELS=off` (also `0`, `false`, `no`) to render every
+mask as the plain `[REDACTED]`, in human and machine output alike, for
+environments where even secret names must not appear. Masking itself
+cannot be turned off. `tako config explain --redaction` (human-only) lists
+what will be masked for an environment and why, without printing values.
 
 Do not log stderr blindly: build logs may echo application output that
 Tako cannot classify.

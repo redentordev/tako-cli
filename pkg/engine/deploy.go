@@ -235,23 +235,16 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	session.allServices = allServices
 	e.RegisterPublicConfigNames(cfg, allServices)
 	e.RegisterServiceEnvValues(allServices)
-	for _, build := range cfg.Builds {
-		for _, value := range build.Args {
-			e.RegisterSecret(value)
-		}
-	}
+	// An unreadable envFile fails the deploy later, when env files are built.
+	_ = e.RegisterServiceEnvFileValues(allServices)
+	e.RegisterBuildArgs(cfg)
 	// Unresolvable secrets fail the deploy later, when env files are built.
 	_ = e.registerServiceSecretValues(cfg, session.envName, allServices)
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(cfg.Servers)
 	e.RegisterRegistrySecrets(cfg)
+	e.RegisterBackupSecrets(allServices)
 	e.RegisterACMEDNSSecrets(cfg)
-	if cfg.Notifications != nil {
-		e.RegisterSecret(cfg.Notifications.Slack)
-		e.RegisterSecret(cfg.Notifications.Discord)
-		e.RegisterSecret(cfg.Notifications.Webhook)
-	}
+	e.RegisterNotificationSecrets(cfg)
 
 	// Create SSH pool.
 	session.sshPool = ssh.NewPool()
