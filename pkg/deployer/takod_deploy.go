@@ -2418,7 +2418,7 @@ func (d *Deployer) PreflightServiceMutationCapabilities(services map[string]conf
 
 // selfHealingCapabilityFeature names the capability in the exit-2 error of
 // a deploy whose services enable self-healing against an older agent.
-const selfHealingCapabilityFeature = "self-healing (missing capability " + takod.CapabilityNodeSelfHealingV1 + ")"
+const selfHealingCapabilityFeature = takodclient.HealFeature
 
 func preflightServiceMutationCapabilitiesWithCheck(services map[string]config.ServiceConfig, env *config.EnvironmentConfig, check func(capability, feature string) error) error {
 	logging, healing := false, false

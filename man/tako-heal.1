@@ -1,0 +1,67 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-heal - Inspect and control local self-healing
+
+
+.SH SYNOPSIS
+\fBtako heal [flags]\fP
+
+
+.SH DESCRIPTION
+Inspect and control node-local self-healing.
+
+.PP
+Self-healing is opt-in (selfHealing.enabled in tako.yaml). takod restarts an
+unhealthy container or starts a crashed one on its own node, with backoff, a
+give-up limit and a node circuit breaker. It never creates containers and
+never acts during a deploy, restore or pause. See docs/SELF-HEALING.md.
+
+.PP
+Examples:
+  tako heal status                       # Per-service state on every node
+  tako heal status --service web         # One service with its journal
+  tako heal pause                        # Pause the environment for 1h
+  tako heal pause --service web --for 4h # Pause one service
+  tako heal pause --until-resume         # Pause until tako heal resume
+  tako heal resume                       # End pauses
+  tako heal reset --service web          # Clear give-up and backoff
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for heal
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to use (default: the only environment, else production, else the first alphabetically)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB--preview\fP=""
+	preview environment to use (deploy, ps, logs, exec, history, rollback, config explain); -e then names its base
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP, \fBtako-heal-pause(1)\fP, \fBtako-heal-reset(1)\fP, \fBtako-heal-resume(1)\fP, \fBtako-heal-status(1)\fP

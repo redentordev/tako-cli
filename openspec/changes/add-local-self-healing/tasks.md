@@ -33,10 +33,10 @@ Prerequisite: `add-takod-health-monitoring` has landed (shared container sampler
 
 - [x] 4.1 Capability gate in every desired-state-writing command when any service policy is enabled (`RequireTakodCapabilityContext`, `pkg/engine/takod.go:238`); test that deploy fails with exit 2 before mutation against an old agent, naming `node.self-healing-v1`
 - [x] 4.2 Lease acquisition: when the holder's operation is `self-heal`, wait and retry up to 60s before `LockedError`; tests for self-heal holder released in time, held too long, and a non-heal holder unchanged
-- [ ] 4.3 `pkg/takodclient` heal client and `pkg/engine/heal.go` (status fan-out to target nodes, pause/resume/reset)
-- [ ] 4.4 `cmd/heal.go`: `status`, `pause` (`--service`, `--for`, `--until-resume`, `--server`), `resume`, `reset`; text and `--output json` (`HealStatus`, `HealChangeResult`); golden tests
-- [ ] 4.5 `tako ps`: additive `heal` object and `heal:gave_up`/`heal:paused` status note (`cmd/ps.go:182`); tests with and without the capability
-- [ ] 4.6 Regenerate man pages and completions
+- [x] 4.3 `pkg/takodclient` heal client and `pkg/engine/heal.go` (status fan-out to target nodes, pause/resume/reset)
+- [x] 4.4 `cmd/heal.go`: `status`, `pause` (`--service`, `--for`, `--until-resume`, `--server`), `resume`, `reset`; text and `--output json` (`HealStatus`, `HealChangeResult`); golden tests
+- [x] 4.5 `tako ps`: additive `heal` object and `heal:gave_up`/`heal:paused` status note (`cmd/ps.go:182`); tests with and without the capability
+- [x] 4.6 Regenerate man pages and completions
 
 ## 5. Docs
 

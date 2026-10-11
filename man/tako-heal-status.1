@@ -1,0 +1,70 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-heal-status - Show self-healing state, pauses, breaker and journal
+
+
+.SH SYNOPSIS
+\fBtako heal status [flags]\fP
+
+
+.SH DESCRIPTION
+Show the self-healing state that takod reports on every server of the
+environment: per-service state and skip reason, pauses, the node circuit
+breaker and the recent decision journal.
+
+.PP
+Exit codes: 0 ok or disabled; 6 a service gave up, a breaker is open or a node
+could not be read; 4 every node unreachable; 2 no node supports
+node.self-healing-v1 (run tako upgrade servers).
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for status
+
+.PP
+\fB--journal\fP=20
+	Recent journal entries per node (0-1000)
+
+.PP
+\fB--server\fP=""
+	One server only
+
+.PP
+\fB-s\fP, \fB--service\fP=""
+	One service only
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to use (default: the only environment, else production, else the first alphabetically)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB--preview\fP=""
+	preview environment to use (deploy, ps, logs, exec, history, rollback, config explain); -e then names its base
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-heal(1)\fP
