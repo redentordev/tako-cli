@@ -132,7 +132,7 @@ func (p *osProbe) Updates(ctx context.Context) (NodeOSStatus, error) {
 	status := NodeOSStatus{PackageManager: p.packageManager(), CheckedAt: p.now()}
 	switch status.PackageManager {
 	case "apt":
-		result := p.runNice(ctx, "apt-get", "-s", "-o", "Debug::NoLocking=1", "upgrade")
+		result := p.runNice(ctx, "apt-get", "-s", "-o", "Debug::NoLocking=1", "dist-upgrade")
 		if result.Err != nil {
 			return status, fmt.Errorf("apt simulation: %w", result.Err)
 		}

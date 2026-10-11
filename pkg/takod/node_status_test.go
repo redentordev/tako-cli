@@ -152,7 +152,7 @@ func TestOSProbeUbuntuSecurityUpdates(t *testing.T) {
 		t.Fatalf("security packages = %v", status.SecurityPackages)
 	}
 	command := strings.Join(host.commands[0], " ")
-	if command != "nice -n 10 ionice -c3 apt-get -s -o Debug::NoLocking=1 upgrade" {
+	if command != "nice -n 10 ionice -c3 apt-get -s -o Debug::NoLocking=1 dist-upgrade" {
 		t.Fatalf("command = %s", command)
 	}
 }
@@ -231,7 +231,7 @@ func TestOSProbeNeverMutatesTheNode(t *testing.T) {
 		for _, argv := range host.commands {
 			for _, arg := range argv {
 				switch arg {
-				case "update", "makecache", "install", "reboot", "shutdown", "dist-upgrade":
+				case "update", "makecache", "install", "reboot", "shutdown", "upgrade", "full-upgrade", "autoremove":
 					t.Fatalf("probe ran a mutating command: %v", argv)
 				}
 			}
