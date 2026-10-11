@@ -51,6 +51,8 @@ type ScaleResult struct {
 	Duration    float64                  `json:"durationSeconds"`
 	Message     string                   `json:"message,omitempty"`
 	Error       string                   `json:"error,omitempty"`
+	// Summary is the end-of-operation summary (additive).
+	Summary *OperationSummary `json:"summary,omitempty"`
 }
 
 // ParseScaleTargets parses SERVICE=REPLICAS arguments into a target map.
@@ -233,12 +235,14 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 
 	notifier := scaleNotifier(cfg, req.Verbose)
 	scaledImageRefs := make(map[string]string, len(scaleTargets))
+	previousReplicas := make(map[string]int, len(scaleTargets))
 	totalErrors := 0
 	for serviceName, desiredReplicas := range scaleTargets {
 		currentReplicas := 0
 		if actual, ok := actualState[serviceName]; ok {
 			currentReplicas = actual.Replicas
 		}
+		previousReplicas[serviceName] = currentReplicas
 
 		e.emit(events.Event{
 			Type:    events.TypeDeployServiceStarted,
@@ -275,7 +279,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 				Service: serviceName,
 				Message: fmt.Sprintf("  Failed: %v\n", deployErr),
 			})
-			result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: imageRef, Action: OutcomeFailed, Replicas: desiredReplicas, Error: deployErr.Error()})
+			result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: imageRef, Action: OutcomeFailed, Replicas: desiredReplicas, Error: e.RedactSensitive(deployErr.Error())})
 			totalErrors++
 			continue
 		}
@@ -296,11 +300,28 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 		}
 	}
 
+	summaryInput := func(deploymentID string) scaleSummaryInput {
+		return scaleSummaryInput{
+			Project:      cfg.Project.Name,
+			Environment:  envName,
+			StartedAt:    startTime,
+			Duration:     result.Duration,
+			DeploymentID: deploymentID,
+			Services:     desiredServices,
+			Outcomes:     result.Services,
+			Previous:     previousReplicas,
+			Failed:       result.Status == takoapi.StatusFailed,
+			Error:        result.Error,
+			Health:       e.healthProbe(ctx, runtimeFactory, cfg, envName, serverNames, desiredServices),
+		}
+	}
+
 	if totalErrors > 0 {
 		scaleErr := fmt.Errorf("scaling completed with %d error(s)", totalErrors)
 		result.Status = takoapi.DeploymentStatus(remotestate.StatusFailed)
-		result.Error = scaleErr.Error()
+		result.Error = e.RedactSensitive(scaleErr.Error())
 		result.Duration = time.Since(startTime).Seconds()
+		result.Summary = buildScaleSummary(e.RedactSensitive, summaryInput(""))
 		return result, scaleErr
 	}
 
@@ -347,6 +368,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	result.Status = takoapi.DeploymentStatus(remotestate.StatusSuccess)
 	result.Message = scaleDeployment.Message
 	result.Duration = time.Since(startTime).Seconds()
+	result.Summary = buildScaleSummary(e.RedactSensitive, summaryInput(scaleDeployment.ID))
 	return result, nil
 }
 

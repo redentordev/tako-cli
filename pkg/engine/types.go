@@ -240,6 +240,8 @@ type DeployResult struct {
 	DeploymentID string `json:"deploymentId,omitempty"`
 	// Hooks lists the local lifecycle hooks considered, in run order.
 	Hooks []HookOutcome `json:"hooks,omitempty"`
+	// Summary is the end-of-operation summary (additive).
+	Summary *OperationSummary `json:"summary,omitempty"`
 }
 
 // Hook outcome statuses carried in HookOutcome.Status.

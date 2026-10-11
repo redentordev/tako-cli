@@ -194,6 +194,25 @@ func (s *hookSession) hookOutcomes() []engine.HookOutcome {
 	return append([]engine.HookOutcome(nil), s.outcomes...)
 }
 
+// preHookFailed reports whether the command's pre hook failed, which means
+// the operation stopped before any mutation.
+func (s *hookSession) preHookFailed() bool {
+	return s != nil && s.failedHook != "" && s.failedHook == s.pre
+}
+
+// mutationReached reports whether the operation may have reached its
+// mutation stage: false only when hooks prove it stopped before it (the pre
+// hook failed, or a hook-gated engine never asked to mutate).
+func (s *hookSession) mutationReached() bool {
+	if s.preHookFailed() {
+		return false
+	}
+	if s != nil && !s.inert() && !s.reached {
+		return false
+	}
+	return true
+}
+
 // run executes one hook with the session context merged into ctx values.
 func (s *hookSession) run(ctx context.Context, name hooks.Name, values hooks.Context) hooks.Outcome {
 	if ctx == nil {

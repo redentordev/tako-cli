@@ -87,10 +87,12 @@ func runPromote(cmd *cobra.Command, args []string) error {
 				StartedAt:   time.Now(),
 				Error:       cliEngine().RedactSensitive(errorText(err)),
 			}
+			result.Summary = synthesizedFailureSummary(hookSession, engine.SummaryOperationPromote, cfg.Project.Name, request.Environment, []string{serviceName}, result.StartedAt, result.Error)
 		}
 		result.Hooks = outcomes
 	}
 	if result != nil {
+		emitOperationSummary(result.Summary, result.Hooks)
 		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
 			err = emitErr
 		}

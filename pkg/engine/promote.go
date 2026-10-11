@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -60,6 +61,8 @@ type PromoteResult struct {
 	Error       string                   `json:"error,omitempty"`
 	// Hooks lists the local lifecycle hooks considered, in run order.
 	Hooks []HookOutcome `json:"hooks,omitempty"`
+	// Summary is the end-of-operation summary (additive).
+	Summary *OperationSummary `json:"summary,omitempty"`
 }
 
 // Promote switches proxy routes to a warmed blue-green revision, prunes stale
@@ -329,6 +332,36 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 
 	result.Status = takoapi.DeploymentStatus(remotestate.StatusSuccess)
 	result.Duration = time.Since(startTime).Seconds()
+
+	strategy, _ := serviceStrategyReport(&service)
+	summaryInput := promoteSummaryInput{
+		Project:      cfg.Project.Name,
+		Environment:  envName,
+		StartedAt:    startTime,
+		Duration:     result.Duration,
+		DeploymentID: promoteDeployment.ID,
+		Service:      serviceName,
+		Strategy:     strategy,
+		ToImage:      targetImage,
+		ToRevision:   targetRevision,
+		Health:       e.healthProbe(ctx, runtimeFactory, cfg, envName, serverNames, services),
+	}
+	if actual != nil {
+		summaryInput.FromImage = actual.Image
+		summaryInput.FromRevision = actual.CurrentRevision
+	}
+	summaryInput.Retained = summaryInput.FromRevision != "" && containsString(promotionCandidateRevisions(postActualState[serviceName]), summaryInput.FromRevision)
+	if !summaryInput.Retained {
+		// Best effort: pin the fallback rollback to the newest stable record
+		// before this promotion that contains the service.
+		history, historyErr := stateManager.LoadHistoryContext(ctx)
+		if historyErr != nil && !errors.Is(historyErr, remotestate.ErrNotFound) {
+			summaryInput.HistoryErr = historyErr
+		} else {
+			summaryInput.Fallback = newestStableRecord(history, serviceName, promoteDeployment.Timestamp, promoteDeployment.ID)
+		}
+	}
+	result.Summary = buildPromoteSummary(e.RedactSensitive, summaryInput)
 	return result, nil
 }
 

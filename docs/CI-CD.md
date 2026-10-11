@@ -268,6 +268,37 @@ applies to every deploy path.
   ignores broken hook files. Each skipped hook still appears in the result as
   `skipped`.
 
+## Job Step Summary
+
+When `GITHUB_STEP_SUMMARY` is set, `tako deploy`, `rollback`, `promote` and
+`scale` append a Markdown summary of the operation to that file, so it shows
+on the workflow run page. It contains a status heading (succeeded, partial or
+failed), the duration and deployment ID, a table of services with their
+change, strategy, image, replicas and health, the URLs with their DNS/TLS
+readiness, the undo command, next steps, and the error. It is written in
+every output mode (`--output json` and `--events ndjson` keep stdout
+machine-readable) and is capped at 64 KiB per operation.
+
+- Gitea and Forgejo Actions runners set `GITHUB_STEP_SUMMARY` too, so the
+  summary works there unchanged.
+- Set `TAKO_STEP_SUMMARY=off` (or `0`, `false`, `no`) to disable it.
+- A failure to write the file is a warning and never changes the exit code.
+- Free text is redacted the same way as every other Tako output.
+
+The same summary is the `summary` object of the result document. A pipeline
+can read the undo command without parsing prose:
+
+```bash
+tako deploy --yes --output json > deploy.json || status=$?
+jq -r '.summary.outcome' deploy.json
+# argv form, safe to exec without a shell; null when no safe undo exists
+jq -c '.summary.undo.argv // empty' deploy.json
+jq -r '.summary.undo.unavailable // empty' deploy.json
+```
+
+The undo command never includes `--yes`; add it explicitly when a pipeline
+runs it unattended.
+
 ## Proving the Workflow
 
 Before treating CI deploys as reliable, run the same flow from a temporary fresh

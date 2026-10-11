@@ -28,6 +28,22 @@ commands in `cmd/` are thin adapters over this package.
   and `Close()` releases the local lock, remote leases, and SSH
   connections.
 - Simpler mutations are single calls: `Rollback`, `Promote`, `Scale`.
+- `DeployResult`, `RollbackResult`, `PromoteResult` and `ScaleResult` carry
+  `Summary *OperationSummary` (JSON `summary`, additive) whenever a result is
+  returned, including on failure. `OperationSummary` holds the operation,
+  project, `SummaryEnvironment` (`name`, `kind`), `Outcome`
+  (`SummaryOutcome*` constants), deployment/display ID, revision, duration,
+  `[]SummaryService` rows (`Change`, strategy, from/to image and revision,
+  `*SummaryReplicas`, `Health`), `[]SummaryURL`, a `*SummaryUndo` (argv,
+  shell-quoted command, target, or `Unavailable` reason), up to five
+  `SummaryNextStep`s, the error and notes. Free text is already redacted
+  with the engine's redactor. The engine leaves `--config` out of undo and
+  next-step commands; adapters that load a non-default config insert it
+  (the CLI does). `ShellJoin`/`ShellQuote` produce the POSIX quoting used
+  for `command`. `FailedBeforeMutationSummary` and
+  `FailedWithoutResultSummary` build the summary for result documents an
+  adapter synthesizes (for example after a failing pre-hook). See
+  [Operation summary](./MACHINE-INTERFACE.md#operation-summary).
 - Remote command execution is available as `Exec(ctx, ExecRequest)`, the
   engine backing `tako exec`: run a command in a running service container
   or as a one-off container from the service image. Output streams as
@@ -303,6 +319,8 @@ phase, level, service, node, message, data), the `Sink` interface, and
 ready-made sinks (`NopSink`, `BufferSink`, `FanoutSink`, `NDJSONSink`).
 `Stream` stamps sequence/time/schema and applies redaction. Event `message`
 carries the exact human rendering; machine consumers parse `type`/`data`.
+`TypeOperationSummary` (`operation.summary`, phase `PhaseSummary`) is the
+CLI's end-of-operation summary event, emitted just before `result`.
 
 ### `pkg/takoapi`
 
