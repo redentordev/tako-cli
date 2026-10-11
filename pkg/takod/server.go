@@ -810,6 +810,11 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 
 	response, err := ReconcileService(r.Context(), request)
 	if err != nil {
+		var failure *ReconcileFailure
+		if errors.As(err, &failure) {
+			writeReconcileFailure(w, failure)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -863,6 +868,51 @@ func (s *Server) handleServiceFilesCheck(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"fileSetId": request.FileSetID})
+}
+
+// writeReconcileFailure returns the typed failure document for reconciles
+// that used a non-legacy failure policy.
+func writeReconcileFailure(w http.ResponseWriter, failure *ReconcileFailure) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadGateway)
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(failure.Body())
+}
+
+func (s *Server) handleServiceFinalize(w http.ResponseWriter, r *http.Request) {
+	s.handleServiceRecovery(w, r, FinalizeRetainedService)
+}
+
+func (s *Server) handleServiceRestore(w http.ResponseWriter, r *http.Request) {
+	s.handleServiceRecovery(w, r, RestoreRetainedService)
+}
+
+func (s *Server) handleServiceRecovery(w http.ResponseWriter, r *http.Request, operation func(context.Context, string, ServiceRecoveryRequest) (*ServiceRecoveryResponse, error)) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request ServiceRecoveryRequest
+	if err := decodeJSONRequest(w, r, &request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateServiceRecoveryRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	response, err := operation(r.Context(), s.dataDir, request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
 }
 
 func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
@@ -2541,7 +2591,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityDeployRestoreOnFailureV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

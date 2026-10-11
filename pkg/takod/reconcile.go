@@ -68,6 +68,12 @@ type ReconcileServiceRequest struct {
 	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
 	ShmSize            string                         `json:"shmSize,omitempty"`
 	Logging            *config.ServiceLoggingConfig   `json:"logging,omitempty"`
+	// FailurePolicy selects rollout failure handling: "" or remove (legacy:
+	// old containers removed first, failed new ones removed), restore
+	// (recreate keeps the previous containers until finalize/restore), or
+	// retain-failed (failed new containers are stopped, never removed). Only
+	// sent to agents advertising CapabilityDeployRestoreOnFailureV1.
+	FailurePolicy string `json:"failurePolicy,omitempty"`
 	// RegistryAuths carries request-scoped pull credentials; they feed an
 	// ephemeral DOCKER_CONFIG for this reconcile only and are never
 	// persisted (ADR 10).
@@ -128,6 +134,10 @@ type HealthSpec struct {
 	SmokePath           string `json:"smokePath,omitempty"`
 	SmokePort           int    `json:"smokePort,omitempty"`
 	SmokeExpectedStatus int    `json:"smokeExpectedStatus,omitempty"`
+	// Implicit marks the TCP readiness probe the CLI adds for a defaulted
+	// rolling service with no healthCheck or deploy.readiness. It only
+	// changes the timeout error text, so older agents may ignore it.
+	Implicit bool `json:"implicit,omitempty"`
 }
 
 type ReconcileServiceResponse struct {
@@ -136,6 +146,11 @@ type ReconcileServiceResponse struct {
 	Service           string   `json:"service"`
 	Containers        []string `json:"containers"`
 	RemovedContainers int      `json:"removedContainers,omitempty"`
+	// RetainedContainers and RestoreToken are set when a recreate reconcile
+	// with FailurePolicy restore kept the previous containers; the CLI
+	// finalizes or restores them with the token.
+	RetainedContainers []string `json:"retainedContainers,omitempty"`
+	RestoreToken       string   `json:"restoreToken,omitempty"`
 }
 
 type RemoveServiceResponse struct {
@@ -189,12 +204,27 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		return nil, err
 	}
 
-	removedContainers, err := removeServiceContainersForReconcile(ctx, req, deployStrategy)
+	failurePolicy := normalizeFailurePolicy(req.FailurePolicy)
+	var retained *retainedServiceState
+	var removedContainers int
+	var err error
+	if failurePolicy == FailurePolicyRestore && deployStrategy == "recreate" {
+		retained, removedContainers, err = retainServiceContainersForReconcile(ctx, req)
+	} else {
+		removedContainers, err = removeServiceContainersForReconcile(ctx, req, deployStrategy)
+	}
 	if err != nil {
 		return nil, err
 	}
+	// Failures after retention must restore the previous containers.
+	fail := func(failedContainer string, started []string, cause error) error {
+		return failReconcile(ctx, req, failurePolicy, retained, started, failedContainer, cause)
+	}
 	cleanupEnvFile, err := prepareServiceEnvFile(&req)
 	if err != nil {
+		if retained != nil {
+			return nil, fail("", nil, err)
+		}
 		return nil, err
 	}
 	if cleanupEnvFile != nil {
@@ -202,39 +232,43 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	}
 	if req.PullImage {
 		if output, err := runDockerWithAuth(ctx, req.RegistryAuths, "pull", req.Image); err != nil {
-			return nil, fmt.Errorf("failed to pull image %s: %w: %s", req.Image, err, annotateRegistryAuthFailure(strings.TrimSpace(output)))
+			pullErr := fmt.Errorf("failed to pull image %s: %w: %s", req.Image, err, annotateRegistryAuthFailure(strings.TrimSpace(output)))
+			if retained != nil {
+				return nil, fail("", nil, pullErr)
+			}
+			return nil, pullErr
 		}
 	}
 
 	started := make([]string, 0, len(req.Containers))
 	for _, container := range req.Containers {
 		if err := runServiceContainer(ctx, req, container); err != nil {
-			if cleanupErr := cleanupStartedContainers(ctx, started); cleanupErr != nil {
-				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
-			}
-			return nil, err
+			return nil, fail(container.Name, started, err)
 		}
 		started = append(started, container.Name)
 		if err := connectContainerNetworks(ctx, container.Name, req.NetworkAttachments); err != nil {
-			if cleanupErr := cleanupStartedContainers(ctx, started); cleanupErr != nil {
-				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
-			}
-			return nil, err
+			return nil, fail("", started, err)
 		}
 		if err := waitForContainerHealthy(ctx, req.Network, container.Name, req.Health); err != nil {
-			if cleanupErr := cleanupStartedContainers(ctx, started); cleanupErr != nil {
-				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
-			}
-			return nil, err
+			return nil, fail("", started, err)
 		}
 	}
-	return &ReconcileServiceResponse{
+	response := &ReconcileServiceResponse{
 		Project:           req.Project,
 		Environment:       req.Environment,
 		Service:           req.Service,
 		Containers:        started,
 		RemovedContainers: removedContainers,
-	}, nil
+	}
+	if retained != nil {
+		retained.Started = append([]string(nil), started...)
+		if err := writeRetainedState(req.DataDir, retained); err != nil {
+			return nil, fail("", started, fmt.Errorf("failed to record started containers: %w", err))
+		}
+		response.RetainedContainers = retained.retainedNames()
+		response.RestoreToken = retained.Token
+	}
+	return response, nil
 }
 
 func RemoveService(ctx context.Context, req RemoveServiceRequest) (*RemoveServiceResponse, error) {
@@ -288,6 +322,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	}
 	if takodDeployStrategyUsesRevisionScope(strategy) && req.Revision == "" {
 		return fmt.Errorf("revision is required for %s deploy strategy", strategy)
+	}
+	if normalizeFailurePolicy(req.FailurePolicy) == "" {
+		return fmt.Errorf("invalid failure policy; supported policies are remove, restore, and retain-failed")
 	}
 	if err := validateRegistryAuths(req.RegistryAuths); err != nil {
 		return err
@@ -1383,6 +1420,17 @@ func waitForContainerHealthy(ctx context.Context, networkName string, containerN
 		}
 	}
 	logs, _ := runDocker(ctx, "logs", containerName, "--tail", "50")
+	if health != nil && health.Implicit {
+		message := fmt.Sprintf("implicit TCP readiness probe for %s failed after %d attempts: no TCP connection to port %d succeeded", containerName, attempts, health.Port)
+		if lastErr != nil {
+			message += fmt.Sprintf(" (last error: %v)", lastErr)
+		}
+		message += fmt.Sprintf("; the service sets no healthCheck or deploy.readiness, so the defaulted rolling strategy waits for the app to accept connections on port %d on all interfaces before shifting traffic. Configure healthCheck (or deploy.readiness), or set deploy.strategy: recreate", health.Port)
+		if strings.TrimSpace(logs) != "" {
+			message += ", last logs:\n" + logs
+		}
+		return fmt.Errorf("%s", message)
+	}
 	if lastErr != nil {
 		if strings.TrimSpace(logs) != "" {
 			return fmt.Errorf("health check timeout for %s after %d attempts: %v, last logs:\n%s", containerName, attempts, lastErr, logs)
