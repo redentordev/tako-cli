@@ -925,6 +925,7 @@ func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	request.DataDir = s.dataDir
 	response, err := RemoveService(r.Context(), request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)

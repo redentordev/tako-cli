@@ -180,6 +180,22 @@ const (
 	// (false when the request body could not be replayed).
 	TypeHygieneReclaimed = "hygiene.reclaimed"
 
+	// Self-healing state events. takod appends them to the environment event
+	// log when it restarts or starts a converged container on its own node,
+	// gives up, pauses or resumes, or opens or closes its node circuit
+	// breaker. They carry reason codes and numbers only (data.service,
+	// data.container, data.revision, data.reason, data.code, data.node) and
+	// never container logs or raw errors. They are not deployment history.
+	TypeHealRestarted     = "heal.restarted"
+	TypeHealStarted       = "heal.started"
+	TypeHealFailed        = "heal.failed"
+	TypeHealGaveUp        = "heal.gave_up"
+	TypeHealReset         = "heal.reset"
+	TypeHealPaused        = "heal.paused"
+	TypeHealResumed       = "heal.resumed"
+	TypeHealCircuitOpen   = "heal.circuit_open"
+	TypeHealCircuitClosed = "heal.circuit_closed"
+
 	TypeWarning = "warning"
 
 	// TypeOperationSummary carries the end-of-operation summary for deploy,

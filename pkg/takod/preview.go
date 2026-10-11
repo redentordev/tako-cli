@@ -297,6 +297,11 @@ func cleanupPreviewEnvironment(ctx context.Context, req CleanupRequest) (*Cleanu
 		response.PreviewNotFound = true
 		return response, nil
 	}
+	// Never heal during teardown: drop the preview's self-healing state
+	// (waiting for an in-flight action) before anything is removed.
+	if err := healClearScope(req.DataDir, req.Project, req.Environment); err != nil {
+		return response, fmt.Errorf("failed to clear self-healing state: %w", err)
+	}
 
 	if err := RemoveProxyFiles(ctx, req.ProxyFiles); err != nil {
 		return response, fmt.Errorf("failed to withdraw proxy files: %w", err)

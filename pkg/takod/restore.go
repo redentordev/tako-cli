@@ -514,6 +514,7 @@ func failReconcile(ctx context.Context, req ReconcileServiceRequest, policy stri
 			return failure
 		}
 		failure.Restored = true
+		healRecordRestored(req.DataDir, retained)
 		if err := removeRetainedState(req.DataDir, req.Project, req.Environment, req.Service); err != nil {
 			failure.Err = fmt.Errorf("%w; additionally failed to clear retained container state: %v", cause, err)
 		}
@@ -627,6 +628,7 @@ func RestoreRetainedService(ctx context.Context, dataDir string, req ServiceReco
 	if err := restoreRetainedContainers(ctx, state, state.Started); err != nil {
 		return nil, fmt.Errorf("failed to restore previous containers: %w", err)
 	}
+	healRecordRestored(dataDir, state)
 	if err := removeRetainedState(dataDir, req.Project, req.Environment, req.Service); err != nil {
 		return nil, fmt.Errorf("failed to clear retained container state: %w", err)
 	}

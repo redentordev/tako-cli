@@ -109,6 +109,9 @@ type RemoveServiceRequest struct {
 	Environment  string `json:"environment"`
 	Service      string `json:"service"`
 	KeepRevision string `json:"keepRevision,omitempty"`
+	// DataDir is set by the server (never read from the body) so removal
+	// clears the service's self-healing converged record.
+	DataDir string `json:"-"`
 }
 
 type ContainerSpec struct {
@@ -187,6 +190,8 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	}
 
 	if len(req.Containers) == 0 {
+		// Scale to zero: self-healing must forget the service first.
+		healClearRecord(req.DataDir, req.Project, req.Environment, req.Service)
 		removedContainers, err := removeServiceContainersForReconcile(ctx, req, deployStrategy)
 		if err != nil {
 			return nil, err
@@ -208,6 +213,9 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		return nil, err
 	}
 
+	// The converged record is converging (ignored by self-healing) from here
+	// until every new container passed its readiness wait.
+	healMarkConverging(req)
 	failurePolicy := normalizeFailurePolicy(req.FailurePolicy)
 	var retained *retainedServiceState
 	var removedContainers int
@@ -245,11 +253,14 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	}
 
 	started := make([]string, 0, len(req.Containers))
+	startedIDs := make(map[string]string, len(req.Containers))
 	for _, container := range req.Containers {
-		if err := runServiceContainer(ctx, req, container); err != nil {
+		id, err := runServiceContainer(ctx, req, container)
+		if err != nil {
 			return nil, fail(container.Name, started, err)
 		}
 		started = append(started, container.Name)
+		startedIDs[container.Name] = id
 		if err := connectContainerNetworks(ctx, container.Name, req.NetworkAttachments); err != nil {
 			return nil, fail("", started, err)
 		}
@@ -272,6 +283,7 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		response.RetainedContainers = retained.retainedNames()
 		response.RestoreToken = retained.Token
 	}
+	healRecordConverged(req, started, startedIDs)
 	return response, nil
 }
 
@@ -279,6 +291,7 @@ func RemoveService(ctx context.Context, req RemoveServiceRequest) (*RemoveServic
 	if err := validateRemoveServiceRequest(req); err != nil {
 		return nil, err
 	}
+	healClearRecordUnlessRevision(req.DataDir, req.Project, req.Environment, req.Service, req.KeepRevision)
 	removedContainers, err := removeServiceContainersKeepingRevision(ctx, req.Project, req.Environment, req.Service, req.KeepRevision)
 	if err != nil {
 		return nil, err
@@ -1215,12 +1228,28 @@ func dockerContainerNotFound(output string) bool {
 	return strings.Contains(output, "no such container") || strings.Contains(output, "no such object")
 }
 
-func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, container ContainerSpec) error {
+func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, container ContainerSpec) (string, error) {
 	args := buildServiceContainerArgs(req, container)
-	if output, err := runDocker(ctx, args...); err != nil {
-		return fmt.Errorf("failed to start container %s: %w, output: %s", container.Name, err, output)
+	output, err := runDocker(ctx, args...)
+	if err != nil {
+		return "", fmt.Errorf("failed to start container %s: %w, output: %s", container.Name, err, output)
 	}
-	return nil
+	return dockerRunContainerID(output), nil
+}
+
+// dockerRunContainerID returns the container ID `docker run -d` prints as
+// its last output line, or "" when that line is not a container ID (pull
+// progress is interleaved on the combined output).
+func dockerRunContainerID(output string) string {
+	lines := strings.Fields(strings.TrimSpace(output))
+	if len(lines) == 0 {
+		return ""
+	}
+	id := lines[len(lines)-1]
+	if len(id) != 64 || !isHexIdentifier(id) {
+		return ""
+	}
+	return id
 }
 
 func cleanupStartedContainers(ctx context.Context, containerNames []string) error {

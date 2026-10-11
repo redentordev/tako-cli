@@ -13,9 +13,9 @@ Prerequisite: `add-takod-health-monitoring` has landed (shared container sampler
 
 ## 2. takod: records, journal, control state
 
-- [ ] 2.1 New `pkg/takod/heal_record.go`: converged record `{image, revision, containers[{name,id}], restart, recordedAt}` read/write (`<dataDir>/heal/<project>/<env>/services/<service>.json`, atomic, 0600), `converging` marker, clear, and the validity rule (not converging, image equals desired image); unit tests including a stale record after a simulated older-agent deploy (image differs) and after a retention rename (name differs)
-- [ ] 2.2 Write `converging` at the start of `ReconcileService` and the final record at its success return (`reconcile.go:163-271`); write records on restore-on-failure finalize and restore (`restore.go`); clear on `RemoveService`, zero-container reconcile, environment/project cleanup (`cleanup.go`) and preview teardown. Tests with a fake docker runner for success, failure (record stays converging), retain-failed, finalize, restore, scale to zero
-- [ ] 2.3 Heal journal (`journal.jsonl`, capped 1000 lines, reason codes and numbers only) and control state (`control.json`: pauses with expiry, gave-up, counters, cooldowns, circuit breaker); persistence across takod restart test; a test that a health error containing log text never reaches the journal
+- [x] 2.1 New `pkg/takod/heal_record.go`: converged record `{image, revision, containers[{name,id}], restart, recordedAt}` read/write (`<dataDir>/heal/<project>/<env>/services/<service>.json`, atomic, 0600), `converging` marker, clear, and the validity rule (not converging, image equals desired image); unit tests including a stale record after a simulated older-agent deploy (image differs) and after a retention rename (name differs)
+- [x] 2.2 Write `converging` at the start of `ReconcileService` and the final record at its success return (`reconcile.go:163-271`); write records on restore-on-failure finalize and restore (`restore.go`); clear on `RemoveService`, zero-container reconcile, environment/project cleanup (`cleanup.go`) and preview teardown. Tests with a fake docker runner for success, failure (record stays converging), retain-failed, finalize, restore, scale to zero
+- [x] 2.3 Heal journal (`journal.jsonl`, capped 1000 lines, reason codes and numbers only) and control state (`control.json`: pauses with expiry, gave-up, counters, cooldowns, circuit breaker); persistence across takod restart test; a test that a health error containing log text never reaches the journal
 
 ## 3. takod: heal loop
 
