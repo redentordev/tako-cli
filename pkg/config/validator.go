@@ -82,6 +82,9 @@ func ValidateConfig(cfg *Config) error {
 			return err
 		}
 	}
+	if err := ValidateAliases(cfg.Aliases); err != nil {
+		return err
+	}
 
 	// Validate servers
 	if len(cfg.Servers) == 0 {

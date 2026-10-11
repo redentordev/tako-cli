@@ -49,6 +49,32 @@
     "secretSources": {
       "$ref": "#/definitions/secretSources"
     },
+    "aliases": {
+      "type": "object",
+      "description": "Project command aliases: `tako <alias> [args...]` runs `tako <alias args...> [args...]`. Values are Tako arguments (list form, preferred) or one string split on whitespace with shell-style quoting but no shell. Values are literal: ${...} references are rejected. Built-in commands always take precedence over aliases.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+        "not": { "enum": ["help", "completion", "__complete", "__completeNoDesc", "aliases"] }
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tako arguments as one string, e.g. \"logs web --follow\""
+          },
+          {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "Tako arguments, e.g. [exec, -it, web, --, bin/rails, console]"
+          }
+        ]
+      },
+      "examples": [
+        { "console": ["exec", "-it", "web", "--", "bin/rails", "console"], "logsw": "logs web --follow" }
+      ]
+    },
     "$schema": {
       "type": "string",
       "description": "JSON Schema reference for IDE support"

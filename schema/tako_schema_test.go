@@ -5,6 +5,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -185,6 +186,51 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	otherCredentials := schemaPath(t, condition, "else", "properties", "credentials")
 	if !reflect.DeepEqual(otherCredentials["required"], []any{"apiToken"}) || otherCredentials["additionalProperties"] != false {
 		t.Fatalf("non-cloudflare credentials schema = %#v", otherCredentials)
+	}
+}
+
+func TestTakoSchemaDescribesAliases(t *testing.T) {
+	schema := loadTakoSchema(t)
+	aliases := schemaPath(t, schema, "properties", "aliases")
+	if aliases["type"] != "object" {
+		t.Fatalf("aliases type = %#v, want object", aliases["type"])
+	}
+	assertRequiredDoesNotContain(t, schema, []string{"aliases"})
+
+	names := schemaPath(t, aliases, "propertyNames")
+	namePattern := regexp.MustCompile(names["pattern"].(string))
+	for _, name := range []string{"console", "db_shell-2", "9lives", strings.Repeat("a", 63)} {
+		if !namePattern.MatchString(name) {
+			t.Fatalf("alias name schema rejects %q", name)
+		}
+	}
+	for _, name := range []string{"Console", "-x", "db:shell", "_x", "", strings.Repeat("a", 64)} {
+		if namePattern.MatchString(name) {
+			t.Fatalf("alias name schema accepts %q", name)
+		}
+	}
+	reserved, ok := schemaPath(t, names, "not")["enum"].([]any)
+	want := []any{"help", "completion", "__complete", "__completeNoDesc", "aliases"}
+	if !ok || !reflect.DeepEqual(reserved, want) {
+		t.Fatalf("reserved alias names = %#v, want %#v", reserved, want)
+	}
+	for _, name := range want {
+		if !config.IsReservedAliasName(name.(string)) {
+			t.Fatalf("schema reserves %q but config does not", name)
+		}
+	}
+
+	branches, ok := schemaPath(t, aliases, "additionalProperties")["oneOf"].([]any)
+	if !ok || len(branches) != 2 {
+		t.Fatalf("alias value schema must be oneOf string/list: %#v", aliases["additionalProperties"])
+	}
+	scalar := branches[0].(map[string]any)
+	list := branches[1].(map[string]any)
+	if scalar["type"] != "string" || scalar["minLength"] != float64(1) {
+		t.Fatalf("alias string branch = %#v", scalar)
+	}
+	if list["type"] != "array" || list["minItems"] != float64(1) || schemaPath(t, list, "items")["type"] != "string" {
+		t.Fatalf("alias list branch = %#v", list)
 	}
 }
 
