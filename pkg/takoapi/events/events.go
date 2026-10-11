@@ -44,6 +44,8 @@ const (
 	PhaseSetup   = "setup"
 	// PhaseHooks groups local lifecycle hook events (hook.*).
 	PhaseHooks = "hooks"
+	// PhaseSummary carries the end-of-operation summary (operation.summary).
+	PhaseSummary = "summary"
 )
 
 // Event types. Consumers must tolerate unknown types (additive schema).
@@ -162,6 +164,13 @@ const (
 	TypeHookSkipped   = "hook.skipped"
 
 	TypeWarning = "warning"
+
+	// TypeOperationSummary carries the end-of-operation summary for deploy,
+	// rollback, promote, and scale. It is emitted once, immediately before
+	// the result event. Message is the plain-text rendering; data.summary
+	// equals the result document's summary field and data.operation names
+	// the operation.
+	TypeOperationSummary = "operation.summary"
 
 	// TypeResult is the terminal event carrying the operation result document
 	// in machine-output mode.

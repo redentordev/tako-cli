@@ -180,6 +180,125 @@ service's rollout fails, its outcome carries a `recovery` object:
 `DeployResult` also carries `deploymentId` once the deployment history entry
 is recorded (omitted for plan-only runs and for failures before recording).
 
+`DeployResult.urls` and `internalUrls` are sorted by service, then URL, so
+the same configuration yields the same order on every deploy. When a deploy's
+rollout succeeds but persisting state afterwards fails, a `DeployResult` with
+`status: failed` and `error` is now emitted (previously no result document);
+the exit code is unchanged.
+
+### Operation summary
+
+`DeployResult`, `RollbackResult` (both scopes), `PromoteResult` and
+`ScaleResult` carry an additive `summary` object (`OperationSummary`)
+whenever the command produces a result document, including on failure. It
+is the same object in the result document, the `operation.summary` event,
+the human summary block, and the GitHub Actions step summary. New
+integrations should read `summary` instead of re-deriving it from the
+per-command fields.
+
+```json
+{
+  "operation": "deploy",
+  "project": "shop",
+  "environment": { "name": "production", "kind": "standard" },
+  "outcome": "succeeded",
+  "deploymentId": "1767225600123456789",
+  "displayId": "1767225600",
+  "revision": "ab12cd3",
+  "commit": "ab12cd3",
+  "startedAt": "2026-01-01T00:00:00Z",
+  "durationSeconds": 102.4,
+  "services": [
+    {
+      "name": "web",
+      "change": "updated",
+      "strategy": "rolling",
+      "fromImage": "ghcr.io/acme/web:ab12cd3",
+      "toImage": "ghcr.io/acme/web:ef45ab6",
+      "fromRevision": "rev-a",
+      "toRevision": "rev-b",
+      "replicas": { "desired": 3, "running": 3 },
+      "health": "healthy",
+      "nodes": ["node-a"]
+    }
+  ],
+  "urls": [
+    { "service": "web", "url": "https://shop.example.com", "kind": "public", "status": "ready" }
+  ],
+  "undo": {
+    "command": "tako rollback -e production 1767225000",
+    "argv": ["tako", "rollback", "-e", "production", "1767225000"],
+    "targetDeploymentId": "1767225000123456789"
+  },
+  "nextSteps": [{ "reason": "...", "command": "tako ps -e production" }],
+  "notes": ["..."]
+}
+```
+
+- `operation` is `deploy`, `rollback`, `promote` or `scale` (`start`/`stop`
+  report `scale`). `environment.kind` is `standard` for declared
+  environments; treat unknown kinds (a future `preview`) as opaque.
+- `outcome`: `succeeded` (a service changed, nothing failed), `up_to_date`
+  (nothing changed), `warmed` (only revisions warmed for manual promotion),
+  `partial` (failed, and at least one service is not at its pre-operation
+  state: it kept a new state, or it failed and its recovery status is not
+  `restored`), `failed` (failed, and every service is back at its
+  pre-operation state). Exit codes are unchanged: both failure outcomes exit
+  1; an attention-class result (for example a failed post-hook or strict
+  domain checks) keeps outcome `succeeded` and records a note.
+- `services[]` has one row per service in scope, sorted by name. `change` is
+  one of `added`, `updated`, `unchanged`, `warmed`, `restored`, `failed`,
+  `not_attempted`, `ran`, `removed`, `rolled_back`, `skipped`, `promoted`,
+  `scaled`. `not_attempted` rows appear only in the summary (a deploy's
+  `DeployResult.services` still lists attempted services only).
+- `health` is `healthy`, `unhealthy`, `starting`, `degraded` (fewer running
+  than desired replicas), `stopped` (zero desired), `unknown`, or `n/a` (run
+  steps, jobs, removed and not-attempted rows). After an operation that
+  changed something, Tako reads actual state once (per node in parallel,
+  bounded at 10s). A failed or timed-out read yields `unknown` plus a
+  `health not read: ...` note and never changes the exit code.
+- `urls[]` lists `https://` + every proxy domain (`kind: public`) and
+  internal route hosts (`kind: internal`), sorted by service, public before
+  internal, then URL. A public URL's `status` is `ready`, `pending` or
+  `failed` when the deploy checked DNS/TLS, else `not_checked`; `detail`
+  explains a non-ready state.
+- `undo` is pinned to an explicit target: `argv` plus a POSIX shell-quoted
+  `command`. It always selects the environment (`-e <env>`), includes
+  `--config <path>` when a non-default config was used, and never includes
+  `-y` (the undone operation still asks for or requires approval). Deploy
+  undo is a project rollback to the newest stable deployment before the
+  deploy (`targetDeploymentId`); project/service rollback undo rolls forward
+  to the newest stable deployment before the rollback; promote undo
+  re-promotes the previous revision while it is retained, else rolls the
+  service back to the newest stable deployment before the promotion; scale
+  undo restores the previous replica counts. When no safe undo exists,
+  `undo.unavailable` says why (`nothing changed`, `nothing was changed`,
+  `first deployment; nothing to roll back to`, `deployment history
+  unreadable`, ...) and `command`/`argv` are absent. `undo.notes` carries
+  caveats such as persistent services being skipped by project rollback.
+- `nextSteps[]` (at most 5) each carry a `reason` and a `command`: `tako
+  promote` for warmed services, `tako logs --service NAME --since 10m` for
+  failed or restored services, `tako domains status` for pending or failed
+  domains, `tako ps` for unhealthy or degraded services, `tako history` after
+  a partial failure.
+- `notes[]` carries free-text notes: bookkeeping failures after a successful
+  rollout, failed lifecycle hooks (`post-deploy hook failed (exit 1)`), the
+  `tako domains hosts` hint for internal routes, health-read failures.
+
+With `--events ndjson`, the summary is also emitted as one
+`operation.summary` event (phase `summary`) immediately before the terminal
+`result` event: `data.summary` equals the result document's `summary` and
+`data.operation` names the command. Its `message` is the plain-text human
+block. In text mode that block is the last output of the command (after
+post-operation hooks); in machine modes it goes to stderr, so `--output
+json` stdout still holds exactly one document.
+
+Every free-text summary field (errors, reasons, notes, next-step commands,
+URL details, undo notes, the commit) passes through the secret redactor
+before the summary is emitted in any form. Image references, service,
+environment and project names, URLs and deployment IDs are public values and
+appear unmasked.
+
 ### Rollback
 
 `tako rollback` has two scopes, reported in `RollbackResult.scope`:
@@ -802,6 +921,13 @@ See [Rollback](#rollback).
   before the response returns. An authentication failure surfaces as an
   `image.pull.auth_failed` event and a failed result (exit 1); the
   credential values themselves never appear in events or result documents.
+- `DeployResult.error`, `ScaleResult.error` and every per-service `error`
+  pass through the redactor before the result document is emitted, in every
+  output mode (health-failure errors can embed container log lines).
+- The operation `summary` (see [Operation summary](#operation-summary)) is
+  redacted field by field before it is emitted, so its JSON, the
+  `operation.summary` event, the human block and the GitHub step summary
+  never contain a registered secret value.
 - Deployment records store env **keys** only (`<redacted>` values).
 - Generated configs (`tako config export`) redact SSH passwords, environment
   values, volume driver options and labels, proxy basic-auth verifiers, and

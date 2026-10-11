@@ -100,6 +100,8 @@ type RollbackResult struct {
 	Error     string                   `json:"error,omitempty"`
 	// Hooks lists the local lifecycle hooks considered, in run order.
 	Hooks []HookOutcome `json:"hooks,omitempty"`
+	// Summary is the end-of-operation summary (additive).
+	Summary *OperationSummary `json:"summary,omitempty"`
 }
 
 // Rollback re-deploys a service from a recorded deployment state, reconciles
@@ -469,6 +471,30 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	result.Status = takoapi.DeploymentStatus(remotestate.StatusRolledBack)
 	result.Message = rollbackDeployment.Message
 	result.Duration = time.Since(startTime).Seconds()
+	fromImage := ""
+	if actual := intentActualState[req.Service]; actual != nil {
+		fromImage = actual.Image
+	}
+	result.Summary = buildRollbackSummary(e.RedactSensitive, rollbackSummaryInput{
+		Project:      cfg.Project.Name,
+		Environment:  envName,
+		StartedAt:    startTime,
+		Duration:     result.Duration,
+		DeploymentID: rollbackDeployment.ID,
+		Commit:       firstNonEmpty(targetDeployment.GitCommitShort, targetDeployment.GitCommit),
+		Service:      req.Service,
+		Services:     services,
+		Outcomes: []RollbackServiceOutcome{{
+			Name:      req.Service,
+			Action:    RollbackActionRolledBack,
+			FromImage: fromImage,
+			ToImage:   serviceState.Image,
+			Reason:    fmt.Sprintf("restored from deployment %s", remotestate.FormatDeploymentID(targetDeployment.ID)),
+		}},
+		Target:      targetDeployment,
+		RollForward: newestStableRecord(history, req.Service, time.Time{}, ""),
+		Health:      e.healthProbe(ctx, runtimeFactory, cfg, envName, mutationServers, placementServices),
+	})
 	return result, nil
 }
 

@@ -8,6 +8,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"sync"
@@ -28,6 +29,8 @@ type Engine struct {
 	buildWriter   *redactingWriter
 	// logsHooks substitutes node access for StreamLogs in tests.
 	logsHooks *logsHooks
+	// summaryHealthRead substitutes the post-operation health read in tests.
+	summaryHealthRead func(ctx context.Context, cfg *config.Config, envName string, selected []string, services map[string]config.ServiceConfig) (map[string]serviceHealth, error)
 }
 
 type redactingWriter struct {

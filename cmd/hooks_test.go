@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -329,6 +330,21 @@ func TestDeployFailingPreHookAbortsBeforeApply(t *testing.T) {
 	}
 	if len(result.Hooks) != 2 || result.Hooks[0].Status != engine.HookFailed || result.Hooks[1].Name != "on-failure" {
 		t.Fatalf("hooks = %+v", result.Hooks)
+	}
+	summary := result.Summary
+	if summary == nil || summary.Outcome != engine.SummaryOutcomeFailed || len(summary.Services) != 2 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	for _, row := range summary.Services {
+		if row.Change != engine.SummaryChangeNotAttempted {
+			t.Fatalf("row = %+v, want not_attempted", row)
+		}
+	}
+	if summary.Undo == nil || summary.Undo.Command != "" || summary.Undo.Unavailable != "nothing was changed" {
+		t.Fatalf("undo = %+v", summary.Undo)
+	}
+	if !slices.Contains(summary.Notes, "pre-deploy hook failed (exit 3)") {
+		t.Fatalf("notes = %v", summary.Notes)
 	}
 	failure := runner.call(t, hooks.OnFailure)
 	for name, want := range map[string]string{"TAKO_HOOK": "on-failure", "TAKO_COMMAND": "deploy", "TAKO_RESULT": "failed", "TAKO_FAILED_HOOK": "pre-deploy", "TAKO_ERROR_CLASS": "failed"} {

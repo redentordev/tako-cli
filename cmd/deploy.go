@@ -183,11 +183,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	plan := session.Plan()
 	planContext := deployHookContext(plan)
 	var result *engine.DeployResult
+	applied := false
 	err = hookSession.runPre(cmd.Context(), planContext)
 	if err == nil {
 		err = commitDeployClusterAttachment(cmd, pendingAttachment)
 	}
 	if err == nil {
+		applied = true
 		result, err = session.Apply(cmd.Context())
 	}
 	// Post hooks run after the lock and leases are released so a slow smoke
@@ -211,11 +213,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	})
 	if outcomes := hookSession.hookOutcomes(); outcomes != nil {
 		if result == nil {
-			result = failedDeployResult(cfg, request.Environment, plan, err)
+			result = failedDeployResult(cfg, request.Environment, plan, err, applied)
 		}
 		result.Hooks = outcomes
 	}
 	if result != nil {
+		emitOperationSummary(result.Summary, result.Hooks)
 		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
 			err = emitErr
 		}
@@ -242,8 +245,10 @@ var planDeploy = func(ctx context.Context, request engine.DeployRequest) (deploy
 }
 
 // failedDeployResult is the result document for a deploy that stopped
-// before Apply produced one (for example a failing pre-deploy hook).
-func failedDeployResult(cfg *config.Config, envName string, plan engine.DeployPlan, err error) *engine.DeployResult {
+// before Apply produced one (for example a failing pre-deploy hook). Its
+// summary marks every planned service not_attempted, or, when Apply ran and
+// failed without a result, failed with an unknown state.
+func failedDeployResult(cfg *config.Config, envName string, plan engine.DeployPlan, err error, applied bool) *engine.DeployResult {
 	result := &engine.DeployResult{
 		APIVersion:  takoapi.APIVersionCurrent,
 		Kind:        engine.KindDeployResult,
@@ -258,6 +263,14 @@ func failedDeployResult(cfg *config.Config, envName string, plan engine.DeployPl
 	}
 	if err != nil {
 		result.Error = cliEngine().RedactSensitive(err.Error())
+	}
+	if applied {
+		result.Summary = cliEngine().FailedWithoutResultSummary(engine.SummaryOperationDeploy, result.Project, envName, plan.Services, result.StartedAt, result.Error)
+	} else {
+		result.Summary = cliEngine().FailedBeforeMutationSummary(engine.SummaryOperationDeploy, result.Project, envName, plan.Services, result.StartedAt, result.Error)
+	}
+	if result.Summary != nil {
+		result.Summary.Revision = plan.Revision
 	}
 	return result
 }
