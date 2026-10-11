@@ -301,9 +301,9 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		meshLine = fmt.Sprintf("Mesh: enabled (%s via %s)\n", cfg.Mesh.NetworkCIDR, cfg.Mesh.Interface)
 	}
 	e.info(events.TypeDeployStarted, events.PhasePlan, fmt.Sprintf(
-		"\n=== Starting deployment ===\n\nProject: %s v%s\nEnvironment: %s\nRuntime: %s\nState: %s (consistency: %s)\nBuild strategy: %s\n%sServers: %d\nServices: %d\n\n",
+		"\n=== Starting deployment ===\n\nProject: %s v%s\nEnvironment: %s\nRuntime: %s\nState: %s (consistency: %s)\n%s%sServers: %d\nServices: %d\n\n",
 		cfg.Project.Name, cfg.Project.Version, session.envName, cfg.GetRuntimeMode(),
-		cfg.GetStateBackend(), cfg.GetDeployConsistency(), cfg.GetBuildStrategy(),
+		cfg.GetStateBackend(), cfg.GetDeployConsistency(), buildStrategyHeaderLine(cfg, services),
 		meshLine, len(servers), len(services)))
 
 	if len(serverNames) == 0 {
@@ -1332,9 +1332,10 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			}
 			e.debug(events.TypeWarning, events.PhaseDomains, fmt.Sprintf("\n⚠️  Skipping public domain DNS/TLS checks: %v\n", err))
 		} else if _, err := e.MonitorDomainStatuses(ctx, health.NewHealthChecker(), domainSpecs, DomainStatusOptions{
-			Timeout:         req.DomainTimeout,
-			Strict:          req.StrictDomains,
-			ExpectedTargets: targets,
+			Timeout:          req.DomainTimeout,
+			Strict:           req.StrictDomains,
+			ExpectedTargets:  targets,
+			NodeCertificates: DomainNodeCertificateChecker(cfg, envName, s.runtime, domainSpecs),
 		}); err != nil {
 			return result, err
 		}

@@ -32,8 +32,8 @@ var cleanupCmd = &cobra.Command{
 	Long: `Clean up app/stage runtime resources to reclaim disk space.
 
 This command helps maintain your servers by:
-  - Removing old service images (keeps latest N)
   - Removing stopped service replicas
+  - Removing old service images (keeps latest N per service and environment)
   - Removing unused Tako project volumes
   - Securing log file permissions
 
@@ -43,6 +43,10 @@ deployment servers lean and efficient.
 Shared-node safety:
   - Default cleanup is scoped to the current project and environment
   - It does not remove unrelated project containers, volumes, proxy routes, or images
+  - Old images are removed only when the node's deployment history attributes
+    them to this environment alone; images referenced by another environment,
+    by any current deployment, or by any container are kept. If that state
+    cannot be read, no images are removed
   - Docker builder cache and dangling image cleanup are global Docker operations;
     use --docker-cache only when you intentionally want to reclaim shared cache
 
@@ -65,7 +69,7 @@ Examples:
 func init() {
 	rootCmd.AddCommand(cleanupCmd)
 	cleanupCmd.Flags().StringVarP(&cleanupServer, "server", "s", "", "Specific server to clean (default: all servers)")
-	cleanupCmd.Flags().IntVarP(&cleanupKeep, "keep", "k", 3, "Number of latest images to keep per service")
+	cleanupCmd.Flags().IntVarP(&cleanupKeep, "keep", "k", 3, "Number of latest images to keep per service and environment")
 	cleanupCmd.Flags().BoolVarP(&cleanupFull, "full", "f", false, "Perform more aggressive app/stage cleanup")
 	cleanupCmd.Flags().BoolVarP(&cleanupSecure, "secure", "", false, "Also secure log file permissions")
 	cleanupCmd.Flags().BoolVar(&cleanupDockerCache, "docker-cache", false, "Also clean Docker builder cache and dangling images shared by all projects")
@@ -127,7 +131,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(out, "🧹 Cleaning up %d server(s)...\n", len(serversToClean))
-	fmt.Fprintf(out, "   Keeping %d latest images per service\n\n", keepImages)
+	fmt.Fprintf(out, "   Keeping %d latest images per service and environment\n\n", keepImages)
 	fmt.Fprintf(out, "Scope: project %s, environment %s\n", cfg.Project.Name, envName)
 	if cleanupDockerCache {
 		fmt.Fprintf(out, "⚠️  Shared Docker cache cleanup enabled: build cache will keep about %s and dangling images may be used by unrelated projects.\n", cleanupCacheKeep)
