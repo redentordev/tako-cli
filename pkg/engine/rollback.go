@@ -234,6 +234,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if err != nil {
 		return nil, &InvalidRequestError{Err: err}
 	}
+	e.RegisterPublicRevisions(targetDeployment.Version, targetDeployment.GitCommit, targetDeployment.GitCommitShort)
 	restoreTargetContext := e.stream.SetContextData(map[string]any{"targetDeploymentId": targetDeployment.ID})
 	defer restoreTargetContext()
 	if req.DeploymentID != "" {

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -256,6 +257,15 @@ func EnvFileUnreadableErrors(err error) []*EnvFileUnreadableError {
 func (e *Engine) RegisterPublic(value string) {
 	if value != "" {
 		e.redactor.RegisterPublic(value)
+	}
+}
+
+// RegisterPublicRevisions keeps deploy revisions, build tags and git commit
+// hashes readable. A full commit SHA is 40 hex characters, which the base64
+// and hex patterns would otherwise mask wherever it is not an image tag.
+func (e *Engine) RegisterPublicRevisions(values ...string) {
+	for _, value := range values {
+		e.RegisterPublic(strings.TrimSpace(value))
 	}
 }
 

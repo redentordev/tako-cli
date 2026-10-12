@@ -218,6 +218,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	if err != nil {
 		return nil, invalidRequestf("cannot promote %s: %w", serviceName, err)
 	}
+	e.RegisterPublicRevisions(targetRevision)
 	targetImage, err := promotionTargetImage(cfg, envName, serviceName, service, actual, targetRevision)
 	if err != nil {
 		return nil, fmt.Errorf("cannot promote %s: %w", serviceName, err)
