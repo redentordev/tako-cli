@@ -96,7 +96,10 @@ func classifyURL(value string) RedactionReason {
 	if !ok || scheme == "" {
 		return ReasonNone
 	}
-	host, path, _ := strings.Cut(rest, "/")
+	host, path := rest, ""
+	if index := strings.IndexAny(rest, "/?#"); index >= 0 {
+		host, path = rest[:index], rest[index:]
+	}
 	if strings.Contains(host, "@") {
 		return ReasonURLWithCredentials
 	}
@@ -138,6 +141,11 @@ func classifyLocatorValue(value string) (RedactionReason, bool) {
 		return ReasonNone, false
 	}
 	for _, item := range items {
+		// A query or fragment can carry a short token the shape check
+		// would miss; the name-based mask stays.
+		if strings.ContainsAny(item, "?#@") {
+			return ReasonNone, false
+		}
 		if reason := classifyURL(item); reason != ReasonNone {
 			if reason.Masked() {
 				return reason, true
@@ -174,6 +182,17 @@ func isHostName(value string) bool {
 	}
 	for _, r := range host {
 		if !(r == '.' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z') {
+			return false
+		}
+	}
+	// A real top-level domain is letters only, so a dotted random token
+	// such as `x7k2p.q9m4z.r8t1w` is not a host name.
+	tld := host[strings.LastIndexByte(host, '.')+1:]
+	if len(tld) < 2 {
+		return false
+	}
+	for _, r := range tld {
+		if r < 'a' || r > 'z' {
 			return false
 		}
 	}

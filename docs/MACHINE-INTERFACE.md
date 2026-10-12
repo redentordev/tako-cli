@@ -1202,11 +1202,11 @@ provider CLI on the deploying machine.
     `_URI`, `_URIS`, `_HOST`, `_HOSTS`, `_HOSTNAME`, `_ORIGIN`, `_ORIGINS`,
     `_ENDPOINT`, `_ISSUER`, `_DOMAIN` or `_DOMAINS` (for example
     `BETTER_AUTH_URL`) stays visible when its value is a list of URLs or
-    lowercase host names. It is still masked when any URL in it has embedded
-    credentials or a token-like part, or when any host has a token-shaped
-    label.
-  - **Host names:** a lowercase dotted host name is token-shaped only when
-    one of its labels is.
+    lowercase host names. It is still masked when any item contains `?`,
+    `#` or `@`, when a URL path has a token-like part, or when a host has a
+    token-shaped label.
+  - **Host names:** a lowercase dotted host name with an all-letter
+    top-level domain is token-shaped only when one of its labels is.
 - Deploy, rollback and promote keep their revision, build tag and git
   commit hashes readable. A full 40-character commit SHA would otherwise
   match the hex and base64 patterns.
