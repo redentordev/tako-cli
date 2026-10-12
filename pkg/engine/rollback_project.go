@@ -336,6 +336,7 @@ func (e *Engine) PlanRollback(ctx context.Context, req RollbackRequest) (_ *Roll
 		return nil, err
 	}
 	session.target = target
+	e.RegisterPublicRevisions(target.Version, target.GitCommit, target.GitCommitShort)
 	session.restoreEvents = append(session.restoreEvents, e.stream.SetContextData(map[string]any{"targetDeploymentId": target.ID}))
 	session.records = map[string]*remotestate.DeploymentState{}
 	if history != nil {

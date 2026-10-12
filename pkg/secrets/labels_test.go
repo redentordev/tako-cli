@@ -104,6 +104,30 @@ func TestClassifyEnvValueReasons(t *testing.T) {
 		{"MONGODB_URI", "mongodb://mongo:27017/app", ReasonPlainSetting},
 		{"STRIPE", "sk_test_51HabcdEFGH1234567890", ReasonTokenShapedValue},
 		{"EMPTY", "", ReasonEmpty},
+
+		// Locators under credential-like names stay visible unless they
+		// carry credentials.
+		{"BETTER_AUTH_URL", "https://admin.example.com", ReasonPlainSetting},
+		{"BETTER_AUTH_TRUSTED_ORIGINS", "https://admin.example.com,https://site.example.com", ReasonPlainSetting},
+		{"NEXTAUTH_URL", "https://app.example.com/api/auth", ReasonPlainSetting},
+		{"KEYCLOAK_HOST", "sso.example.com", ReasonPlainSetting},
+		{"OAUTH_ISSUER", "https://login.example.com/realms/main", ReasonPlainSetting},
+		{"AUTH_URL", "https://user:pa55word@auth.example.com", ReasonCredentialName},
+		{"AUTH_CALLBACK_URL", "https://auth.example.com/cb/abcd1234efgh5678ijkl", ReasonTokenURLPart},
+		{"AUTH_ORIGINS", "https://a.example.com,not a url", ReasonCredentialName},
+		{"AUTH_HOST", "x9f3e2a7c41b8d6e05.example.com", ReasonTokenShapedValue},
+		{"API_KEY_URL", "localhost", ReasonCredentialName},
+		{"AUTH_URL", "https://auth.example.com?key=abc123", ReasonCredentialName},
+		{"AUTH_URL", "https://auth.example.com/cb#access_token=short1", ReasonCredentialName},
+		{"WEBHOOK_URL", "https://hooks.example.com?token=abcd1234efgh5678ijkl", ReasonTokenURLPart},
+		{"AUTH_SECRET", "https://admin.example.com", ReasonCredentialName},
+
+		// Dotted host names are not token-shaped as a whole.
+		{"N8N_HOST", "n8n1.vixilabs-example.com", ReasonPlainSetting},
+		{"SITE_HOST", "site.example.com:8443", ReasonPlainSetting},
+		{"MIXED", "Ab12.Cd34.Ef56.Gh78", ReasonTokenShapedValue},
+		{"DOTTED", "x7k2p.q9m4z.r8t1w.v3n6b", ReasonTokenShapedValue},
+		{"AUTH_URL", "https://auth.example.com/u@x", ReasonCredentialName},
 	}
 	for _, tc := range cases {
 		if got := ClassifyEnvValue(tc.name, tc.value); got != tc.want {

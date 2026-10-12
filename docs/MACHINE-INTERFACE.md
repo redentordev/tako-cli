@@ -1196,7 +1196,20 @@ provider CLI on the deploying machine.
   token-like path or query part (webhook URLs), or when it is a single
   16+ character token mixing letters and digits. Plain settings such as
   `NODE_ENV: production` are not masked; put sensitive values under
-  `secrets:` or a credential-like name.
+  `secrets:` or a credential-like name. Two exceptions keep addresses
+  readable:
+  - **Locator names:** a credential-like name ending in `_URL`, `_URLS`,
+    `_URI`, `_URIS`, `_HOST`, `_HOSTS`, `_HOSTNAME`, `_ORIGIN`, `_ORIGINS`,
+    `_ENDPOINT`, `_ISSUER`, `_DOMAIN` or `_DOMAINS` (for example
+    `BETTER_AUTH_URL`) stays visible when its value is a list of URLs or
+    lowercase host names. It is still masked when any item contains `?`,
+    `#` or `@`, when a URL path has a token-like part, or when a host has a
+    token-shaped label.
+  - **Host names:** a lowercase dotted host name with an all-letter
+    top-level domain is token-shaped only when one of its labels is.
+- Deploy, rollback and promote keep their revision, build tag and git
+  commit hashes readable. A full 40-character commit SHA would otherwise
+  match the hex and base64 patterns.
 - Credential-like values from a service's `envFile`/`envFiles` are
   registered by the same rule as inline `env:` values, labeled
   `envFile.<NAME>`. `deploy` and `exec` ignore an unreadable envFile here

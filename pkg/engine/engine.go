@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -258,6 +259,22 @@ func (e *Engine) RegisterPublic(value string) {
 		e.redactor.RegisterPublic(value)
 	}
 }
+
+// RegisterPublicRevisions keeps deploy revisions, build tags and git commit
+// hashes readable. A full commit SHA is 40 hex characters, which the base64
+// and hex patterns would otherwise mask wherever it is not an image tag.
+// Values shorter than minPublicRevisionLength are skipped: no pattern
+// matches them, and a short public value would split a longer pattern match
+// into pieces too short to mask.
+func (e *Engine) RegisterPublicRevisions(values ...string) {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); len(value) >= minPublicRevisionLength {
+			e.RegisterPublic(value)
+		}
+	}
+}
+
+const minPublicRevisionLength = 12
 
 // RegisterServiceEnvValues registers the plain `env:` values of services that
 // look like credentials (see secrets.ShouldRedactEnvValue). Ordinary settings

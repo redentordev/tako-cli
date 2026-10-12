@@ -209,6 +209,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	session.gitStrings = GitStringsFromCommit(sourceInfo.CommitInfo)
 	session.dirtyStatus = sourceInfo.DirtyStatus
 	session.buildTag = sourceInfo.BuildImageTag
+	e.RegisterPublicRevisions(session.buildTag, session.gitStrings.Hash, session.gitStrings.ShortHash)
 
 	// Acquire state lock to prevent concurrent deployments.
 	session.stateLock = localstate.NewStateLock(session.takoDir())

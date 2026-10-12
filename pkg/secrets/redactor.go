@@ -30,8 +30,10 @@ func RedactionLabelsEnabled() bool {
 // registered with the redactor. Values under credential-like names always
 // are. Other values only when they look like a credential: a URL with
 // embedded userinfo or a token-like path segment or query value (webhook
-// URLs), or a long single token mixing letters and digits.
-// Ordinary settings such as `CMS_RUNTIME_MODE: site` or `NODE_ENV:
+// URLs), or a long single token mixing letters and digits. A credential-like
+// locator name (`BETTER_AUTH_URL`) whose value is a plain URL or host list
+// stays visible, and a lowercase dotted host name is token-shaped only when
+// one of its labels is. Ordinary settings such as `CMS_RUNTIME_MODE: site` or `NODE_ENV:
 // production` would otherwise mask every occurrence of that word, including
 // inside service names like `site-renderer`. Values under `secrets:` and
 // `secretSources` are registered separately and are always redacted.
@@ -46,19 +48,25 @@ func ClassifyEnvValue(name, value string) RedactionReason {
 		return ReasonEmpty
 	}
 	if config.IsCredentialEnvName(name) {
+		// A locator such as BETTER_AUTH_URL or OAUTH_ISSUER_URL names a
+		// credential-like subject, but its value is an address that appears
+		// in domain and URL output; it stays visible unless it carries
+		// credentials.
+		if isLocatorEnvName(name) {
+			if reason, ok := classifyLocatorValue(value); ok {
+				return reason
+			}
+		}
 		return ReasonCredentialName
 	}
-	if scheme, rest, ok := strings.Cut(value, "://"); ok && scheme != "" {
-		host, path, _ := strings.Cut(rest, "/")
-		if strings.Contains(host, "@") {
-			return ReasonURLWithCredentials
+	if _, _, ok := strings.Cut(value, "://"); ok {
+		if reason := classifyURL(value); reason != ReasonNone {
+			return reason
 		}
-		for _, part := range strings.FieldsFunc(path, func(r rune) bool {
-			return r == '/' || r == '?' || r == '&' || r == '=' || r == '#'
-		}) {
-			if looksLikeCredential(part) {
-				return ReasonTokenURLPart
-			}
+	}
+	if isHostName(value) {
+		if hostLooksLikeCredential(value) {
+			return ReasonTokenShapedValue
 		}
 		return ReasonPlainSetting
 	}
@@ -66,6 +74,129 @@ func ClassifyEnvValue(name, value string) RedactionReason {
 		return ReasonTokenShapedValue
 	}
 	return ReasonPlainSetting
+}
+
+// hostLooksLikeCredential reports whether any dot-separated label of a host
+// name is token-shaped, such as a random subdomain used as a secret.
+func hostLooksLikeCredential(host string) bool {
+	host, _, _ = strings.Cut(host, ":")
+	for _, label := range strings.Split(host, ".") {
+		if looksLikeCredential(label) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyURL classifies a `scheme://...` value: masked when it has userinfo
+// or a token-like path or query part, otherwise a plain setting. It returns
+// ReasonNone when value is not a URL.
+func classifyURL(value string) RedactionReason {
+	scheme, rest, ok := strings.Cut(value, "://")
+	if !ok || scheme == "" {
+		return ReasonNone
+	}
+	host, path := rest, ""
+	if index := strings.IndexAny(rest, "/?#"); index >= 0 {
+		host, path = rest[:index], rest[index:]
+	}
+	if strings.Contains(host, "@") {
+		return ReasonURLWithCredentials
+	}
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '?' || r == '&' || r == '=' || r == '#'
+	}) {
+		if looksLikeCredential(part) {
+			return ReasonTokenURLPart
+		}
+	}
+	return ReasonPlainSetting
+}
+
+// locatorEnvSuffixes are name suffixes whose values are addresses, not
+// credentials.
+var locatorEnvSuffixes = []string{
+	"_URL", "_URLS", "_URI", "_URIS", "_HOST", "_HOSTS", "_HOSTNAME",
+	"_ORIGIN", "_ORIGINS", "_ENDPOINT", "_ISSUER", "_DOMAIN", "_DOMAINS",
+}
+
+func isLocatorEnvName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, suffix := range locatorEnvSuffixes {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyLocatorValue classifies the value of a locator-named variable: a
+// list of URLs or host names separated by commas or spaces. It reports
+// ok=false when any item is neither, so the caller keeps the name-based mask.
+// A URL with credentials or a token-like part, or a token-shaped host, is
+// masked.
+func classifyLocatorValue(value string) (RedactionReason, bool) {
+	items := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+	if len(items) == 0 {
+		return ReasonNone, false
+	}
+	for _, item := range items {
+		// A query or fragment can carry a short token the shape check
+		// would miss; the name-based mask stays.
+		if strings.ContainsAny(item, "?#@") {
+			return ReasonNone, false
+		}
+		if reason := classifyURL(item); reason != ReasonNone {
+			if reason.Masked() {
+				return reason, true
+			}
+			continue
+		}
+		if !isHostName(item) {
+			return ReasonNone, false
+		}
+		if hostLooksLikeCredential(item) {
+			return ReasonTokenShapedValue, true
+		}
+	}
+	return ReasonPlainSetting, true
+}
+
+// isHostName reports whether value is a dotted lowercase host name,
+// optionally with a port, such as `admin.example.com` or `db.internal:5432`.
+// Mixed case is rejected so a dotted random token is not mistaken for one.
+func isHostName(value string) bool {
+	host, port, hasPort := strings.Cut(value, ":")
+	if hasPort {
+		if port == "" {
+			return false
+		}
+		for _, r := range port {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	if !strings.Contains(host, ".") || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
+		return false
+	}
+	for _, r := range host {
+		if !(r == '.' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z') {
+			return false
+		}
+	}
+	// A real top-level domain is letters only, so a dotted random token
+	// such as `x7k2p.q9m4z.r8t1w` is not a host name.
+	tld := host[strings.LastIndexByte(host, '.')+1:]
+	if len(tld) < 2 {
+		return false
+	}
+	for _, r := range tld {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 func looksLikeCredential(value string) bool {
